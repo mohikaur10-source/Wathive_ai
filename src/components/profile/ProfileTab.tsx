@@ -1,41 +1,28 @@
 import React, { useState } from 'react';
 import {
   User,
-  Settings,
   Bookmark,
   Calendar,
-  PlusCircle,
-  Eye,
-  EyeOff,
   Edit3,
-  Sliders,
   RotateCcw,
   LogOut,
   Shield,
-  Building,
-  GraduationCap,
   Sparkles,
   Check,
-  AlertTriangle,
   X,
-  ExternalLink,
-  Ban,
-  HeartHandshake,
   CheckCircle2,
-  Award
+  ChevronDown
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { EventItem, UserPreferences, EventCategory } from '../../types';
-import { EVENT_CATEGORIES, UW_FACULTIES, STUDY_YEARS, formatPublicName } from '../../data/mockData';
-import { EventDetailModal } from '../feed/EventDetailModal';
+import { EventCategory, UserPreferences } from '../../types';
+import { EVENT_CATEGORIES, UW_FACULTIES, STUDY_YEARS } from '../../data/mockData';
 import { UWVerificationModal } from '../common/UWVerificationModal';
 import { PersonalityQuizModal } from '../common/PersonalityQuizModal';
+import { safeMediaUrl } from '../../utils/urlSafety';
 
-interface ProfileTabProps {
-  onOpenCreateEvent?: (draft?: EventItem) => void;
-}
+const BUDDY_PRIVACY_KEY = 'wathive_buddy_show_academic';
 
-export const ProfileTab: React.FC<ProfileTabProps> = ({ onOpenCreateEvent }) => {
+export const ProfileTab: React.FC = () => {
   const {
     user,
     logout,
@@ -44,353 +31,141 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onOpenCreateEvent }) => 
     events,
     savedEventIds,
     attendingEventIds,
-    attendeeVisibility,
-    disableBuddyMatching,
-    toggleGoing,
-    toggleSaveEvent,
-    cancelEvent,
-    resetDemoData,
     blockedUserIds,
     unblockUser,
-    allAttendees
+    allAttendees,
+    resetDemoData
   } = useApp();
 
-  const [activeSubSection, setActiveSubSection] = useState<'attending' | 'saved' | 'created'>('attending');
-  const [verificationInfoOpen, setVerificationInfoOpen] = useState(false);
-
   const [editProfileOpen, setEditProfileOpen] = useState(false);
-  const [editPrefsOpen, setEditPrefsOpen] = useState(false);
-  const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
-  const [selectedEventForDetail, setSelectedEventForDetail] = useState<EventItem | null>(null);
+  const [editInterestsOpen, setEditInterestsOpen] = useState(false);
   const [quizModalOpen, setQuizModalOpen] = useState(false);
   const [verificationModalOpen, setVerificationModalOpen] = useState(false);
+  const [blockedListOpen, setBlockedListOpen] = useState(false);
   const [actionNotice, setActionNotice] = useState('');
 
-  // Edit Profile form state
+  // Simple buddy privacy preference persisted cleanly in localStorage
+  const [shareAcademicWithBuddies, setShareAcademicWithBuddies] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(BUDDY_PRIVACY_KEY) !== '0';
+    } catch {
+      return true;
+    }
+  });
+
+  // Edit profile state
   const [editName, setEditName] = useState(user?.name || '');
-  const [editAvatar, setEditAvatar] = useState(user?.avatar || '');
   const [editFaculty, setEditFaculty] = useState(user?.faculty || 'Engineering');
   const [editProgram, setEditProgram] = useState(user?.program || '');
   const [editYear, setEditYear] = useState(user?.year || '3rd Year');
-  const [editBio, setEditBio] = useState(user?.bio || '');
-  const [editDob, setEditDob] = useState(user?.dob || '');
 
-  // Edit Preferences form state
+  // Edit interests state
   const [prefCategories, setPrefCategories] = useState<EventCategory[]>(
     user?.preferences.categories || []
   );
-  const [prefFaculties, setPrefFaculties] = useState<string[]>(
-    user?.preferences.preferredFaculties || []
-  );
-  const [prefYears, setPrefYears] = useState<string[]>(
-    user?.preferences.preferredYears || []
-  );
-  const [prefNoPreferences, setPrefNoPreferences] = useState(
-    user?.preferences.noPreferences || false
-  );
+
+  const showNotice = (msg: string) => {
+    setActionNotice(msg);
+    window.setTimeout(() => setActionNotice(''), 3000);
+  };
 
   if (!user) {
     return (
-      <div className="p-12 text-center space-y-4">
-        <User className="w-12 h-12 text-stone-300 mx-auto" />
-        <h2 className="text-xl font-bold text-stone-900">You are logged out</h2>
-        <p className="text-xs text-stone-600">Please sign in with a demo account to view profile.</p>
+      <div className="max-w-xl mx-auto p-12 bg-surface rounded-3xl border border-line shadow-soft text-center space-y-3">
+        <User className="w-10 h-10 text-muted mx-auto" />
+        <h2 className="font-display text-xl font-bold text-ink">You&apos;re signed out</h2>
+        <p className="text-sm text-muted">
+          Use the menu in the top-right corner to sign back in and manage your hive profile.
+        </p>
       </div>
     );
   }
 
-  // Filtered lists
-  const attendingEvents = events.filter((e) => attendingEventIds.includes(e.id));
-  const savedEvents = events.filter((e) => savedEventIds.includes(e.id));
-  const createdEvents = events.filter((e) => e.creatorId === user.id);
+  const activeGoingCount = events.filter((e) => attendingEventIds.includes(e.id)).length;
+  const activeSavedCount = events.filter((e) => savedEventIds.includes(e.id)).length;
+
+  const handleTogglePrivacyPref = () => {
+    const next = !shareAcademicWithBuddies;
+    setShareAcademicWithBuddies(next);
+    try {
+      localStorage.setItem(BUDDY_PRIVACY_KEY, next ? '1' : '0');
+    } catch {
+      // ignore storage errors
+    }
+    showNotice(
+      next
+        ? 'Faculty & year will be visible to buddies when you opt in.'
+        : 'Faculty & year hidden on buddy previews by default.'
+    );
+  };
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     updateProfile({
-      name: editName.trim(),
-      avatar: editAvatar.trim(),
+      name: editName.trim() || user.name,
       faculty: editFaculty,
       program: editProgram.trim(),
-      year: editYear,
-      bio: editBio.trim(),
-      dob: editDob.trim()
+      year: editYear
     });
     setEditProfileOpen(false);
-    setActionNotice('Profile updated successfully.');
-    setTimeout(() => setActionNotice(''), 3000);
+    showNotice('Profile updated.');
   };
 
-  const handleSavePreferences = (e: React.FormEvent) => {
+  const handleSaveInterests = (e: React.FormEvent) => {
     e.preventDefault();
     const newPrefs: UserPreferences = {
-      categories: prefNoPreferences ? [] : prefCategories,
-      noPreferences: prefNoPreferences,
-      preferredFaculties: prefNoPreferences ? [] : prefFaculties,
-      preferredYears: prefNoPreferences ? [] : prefYears
+      ...user.preferences,
+      categories: prefCategories,
+      noPreferences: prefCategories.length === 0
     };
     updatePreferences(newPrefs);
-    setEditPrefsOpen(false);
-    setActionNotice('Feed preferences updated.');
-    setTimeout(() => setActionNotice(''), 3000);
-  };
-
-  const handleResetData = () => {
-    if (window.confirm('Reset all demo state to fresh default events, chats, and requests?')) {
-      resetDemoData();
-      setAccountSettingsOpen(false);
-      setActionNotice('Demo data restored to initial state.');
-      setTimeout(() => setActionNotice(''), 3000);
-    }
+    setEditInterestsOpen(false);
+    showNotice('Interests updated.');
   };
 
   return (
-    <div className="pb-20 md:pb-12 max-w-5xl mx-auto space-y-6">
-      {/* Notice Banner */}
+    <div className="max-w-3xl mx-auto w-full space-y-6">
       {actionNotice && (
-        <div className="p-3.5 bg-amber-500/10 border border-amber-300 text-amber-950 text-xs font-semibold rounded-2xl flex items-center gap-2 animate-in fade-in">
-          <Check className="w-4 h-4 text-amber-600 shrink-0" />
+        <div className="p-3 bg-surface border border-accent rounded-2xl shadow-soft text-xs font-semibold text-ink flex items-center gap-2">
+          <Check className="w-4 h-4 text-accent-text stroke-[2.8]" />
           <span>{actionNotice}</span>
         </div>
       )}
 
-      {/* Main Profile Header Card */}
-      <div className="bg-white rounded-3xl border border-stone-200 p-6 sm:p-8 shadow-xs relative overflow-hidden">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-          <div className="flex items-start sm:items-center gap-4">
+      {/* Profile Header Card */}
+      <section className="bg-surface rounded-3xl border border-line shadow-soft p-6 sm:p-7 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5">
+          <div className="flex items-center gap-4">
             <img
               src={user.avatar}
               alt={user.name}
               referrerPolicy="no-referrer"
-              className="w-18 h-18 sm:w-20 sm:h-20 rounded-2xl object-cover border-2 border-stone-200 shrink-0 shadow-xs"
+              className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl object-cover ring-2 ring-accent/70 shrink-0"
             />
-            <div className="space-y-1">
+            <div className="space-y-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-xl sm:text-2xl font-bold text-stone-900 tracking-tight">
+                <h1 className="font-display text-2xl font-bold text-ink tracking-tight">
                   {user.name}
                 </h1>
-                <button
-                  type="button"
-                  onClick={() => setVerificationInfoOpen(true)}
-                  className="text-[11px] font-bold text-stone-950 bg-amber-400 border border-amber-400 hover:bg-amber-500 px-2.5 py-0.5 rounded-full shadow-2xs transition-colors flex items-center gap-1 cursor-pointer"
-                  title="Click to view Demo Verification details"
-                >
-                  <Shield className="w-3 h-3 text-stone-950" />
-                  <span>Demo verification (@uwaterloo.ca email)</span>
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2 text-xs text-stone-600 flex-wrap">
-                <div className="flex items-center gap-1">
-                  <Building className="w-3.5 h-3.5 text-amber-600" />
-                  <span className="font-medium text-stone-800">{user.school}</span>
-                </div>
-                <span aria-hidden="true" className="text-stone-400">·</span>
-                <div className="flex items-center gap-1">
-                  <GraduationCap className="w-3.5 h-3.5 text-stone-500" />
-                  <span>{user.faculty} ({user.program})</span>
-                </div>
-                <span aria-hidden="true" className="text-stone-400">·</span>
-                <span>{user.year}</span>
-              </div>
-
-              <p className="text-[11px] text-stone-500 pt-0.5">
-                Buddy profile name: <strong className="text-stone-800">{formatPublicName(user.name)}</strong> (First name & last initial).
-              </p>
-
-              {user.bio && (
-                <p className="text-xs text-stone-700 max-w-xl pt-0.5 leading-relaxed">
-                  {user.bio}
-                </p>
-              )}
-
-            </div>
-          </div>
-
-          {/* Quick Header Action Buttons */}
-          <div className="flex flex-wrap items-center gap-2 self-start sm:self-center">
-            <button
-              onClick={() => {
-                setEditName(user.name);
-                setEditAvatar(user.avatar);
-                setEditFaculty(user.faculty);
-                setEditProgram(user.program);
-                setEditYear(user.year);
-                setEditBio(user.bio);
-                setEditDob(user.dob);
-                setEditProfileOpen(true);
-              }}
-              className="px-3.5 py-2 rounded-xl border border-stone-200 hover:bg-stone-50 text-stone-700 text-xs font-semibold flex items-center gap-1.5 transition-colors"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>Edit Profile</span>
-            </button>
-
-            <button
-              onClick={() => {
-                setPrefCategories(user.preferences.categories);
-                setPrefFaculties(user.preferences.preferredFaculties);
-                setPrefYears(user.preferences.preferredYears);
-                setPrefNoPreferences(user.preferences.noPreferences);
-                setEditPrefsOpen(true);
-              }}
-              className="px-3.5 py-2 rounded-xl border border-stone-200 hover:bg-stone-50 text-stone-700 text-xs font-semibold flex items-center gap-1.5 transition-colors"
-            >
-              <Sliders className="w-3.5 h-3.5" />
-              <span>Preferences</span>
-            </button>
-
-            <button
-              onClick={() => setAccountSettingsOpen(true)}
-              className="p-2 rounded-xl border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
-              title="Account Settings"
-            >
-              <Settings className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
-        {/* Global Attendance Visibility Privacy Notice */}
-        <div className="mt-6 pt-5 border-t border-stone-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs bg-stone-50/80 -mx-6 -mb-6 p-4 sm:px-6">
-          <div className="flex items-center gap-2 text-stone-700">
-            <Shield className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>
-              <strong className="text-stone-900">Privacy & Buddy Settings:</strong> Attendance is strictly private by default. You control &ldquo;Open to meeting attendees&rdquo; per event.
-            </span>
-          </div>
-          <span className="text-[11px] text-stone-500">
-            DOB & Email are never displayed
-          </span>
-        </div>
-      </div>
-
-      {/* CORE DIFFERENTIATOR: Personalized Buddy Compatibility & Verification Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-        {/* Card 1 & 2: Personality & Interest Quiz Profile (2 Cols) */}
-        <div className="md:col-span-2 bg-white rounded-3xl border border-stone-200 p-6 shadow-xs space-y-4">
-          <div className="flex items-start justify-between gap-3 flex-wrap">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 flex-wrap">
-                <HeartHandshake className="w-5 h-5 text-amber-600 shrink-0" />
-                <h3 className="text-base font-bold text-stone-950">
-                  Buddy Compatibility Profile
-                </h3>
-                <span className="text-[10px] bg-amber-400 text-stone-950 font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
-                  Core Feature
-                </span>
-              </div>
-              <p className="text-xs text-stone-600">
-                Powers transparent compatibility matching with students attending the same events.
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setQuizModalOpen(true)}
-              className="px-3.5 py-1.5 bg-stone-950 hover:bg-black text-amber-300 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-2xs transition-all border border-stone-800"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>{user.personalityQuiz ? 'Retake Quiz' : 'Take 1-Min Quiz'}</span>
-            </button>
-          </div>
-
-          {user.personalityQuiz ? (
-            <div className="space-y-3 pt-1">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-                <div className="p-3 bg-stone-50 rounded-2xl border border-stone-200/80 space-y-1">
-                  <span className="text-[10px] uppercase font-bold text-stone-500 block">Social Energy</span>
-                  <span className="font-bold text-stone-950 block">{user.personalityQuiz.socialEnergy}</span>
-                </div>
-
-                <div className="p-3 bg-stone-50 rounded-2xl border border-stone-200/80 space-y-1">
-                  <span className="text-[10px] uppercase font-bold text-stone-500 block">Preferred Atmosphere</span>
-                  <span className="font-bold text-stone-950 block capitalize truncate" title={user.personalityQuiz.socialEnvironment}>
-                    {user.personalityQuiz.socialEnvironment.replace('_', ' ')}
+                {user.isVerifiedUWStudent ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-success-soft text-success text-[11px] font-semibold">
+                    <CheckCircle2 className="w-3 h-3" />
+                    <span>UW Verified</span>
                   </span>
-                </div>
-
-                <div className="p-3 bg-stone-50 rounded-2xl border border-stone-200/80 space-y-1">
-                  <span className="text-[10px] uppercase font-bold text-stone-500 block">Group Size</span>
-                  <span className="font-bold text-stone-950 block capitalize">{user.personalityQuiz.groupSize.replace('_', ' ')}</span>
-                </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setVerificationModalOpen(true)}
+                    className="px-2.5 py-0.5 rounded-full bg-accent text-accent-ink text-[11px] font-bold cursor-pointer hover:bg-accent-hover transition-colors"
+                  >
+                    Verify @uwaterloo.ca
+                  </button>
+                )}
               </div>
 
-              {/* Hobbies list */}
-              <div className="p-3 bg-amber-500/10 rounded-2xl border border-amber-300/80 space-y-2 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-amber-950">Active Interests & Hobbies</span>
-                  <span className="text-[10px] text-amber-900 font-semibold">{user.personalityQuiz.hobbies.length} Selected</span>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {user.personalityQuiz.hobbies.map((hobby) => (
-                    <span
-                      key={hobby}
-                      className="px-2.5 py-1 rounded-xl bg-white border border-amber-200 text-stone-900 font-medium text-[11px] shadow-2xs"
-                    >
-                      {hobby}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="p-6 bg-stone-50 rounded-2xl border border-stone-200 text-center space-y-2">
-              <Sparkles className="w-8 h-8 text-amber-500 mx-auto" />
-              <p className="text-xs font-bold text-stone-900">
-                You haven&apos;t taken the compatibility quiz yet!
-              </p>
-              <p className="text-xs text-stone-500 max-w-sm mx-auto">
-                Answer 5 quick multiple-choice questions about your social vibe, atmosphere preferences, and interests to find like-minded event buddies.
-              </p>
-              <button
-                type="button"
-                onClick={() => setQuizModalOpen(true)}
-                className="mt-2 px-4 py-2 bg-amber-400 hover:bg-amber-500 text-stone-950 font-black text-xs rounded-xl shadow-xs transition-colors"
-              >
-                Start 1-Minute Quiz
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Card 3: Waterloo Student Verification (1 Col) */}
-        <div className="bg-white rounded-3xl border border-stone-200 p-6 shadow-xs flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <Award className="w-5 h-5 text-amber-600 shrink-0" />
-              <h3 className="text-base font-bold text-stone-950">
-                Waterloo Verification
-              </h3>
-            </div>
-
-            {user.isVerifiedUWStudent ? (
-              <div className="p-3.5 bg-emerald-50 rounded-2xl border border-emerald-200 space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-950">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>Verified Waterloo Student</span>
-                </div>
-                <p className="text-[11px] text-stone-700 leading-relaxed">
-                  Your account is verified with University of Waterloo student credentials. Buddy matching features are unlocked.
-                </p>
-              </div>
-            ) : (
-              <div className="p-3.5 bg-amber-100 rounded-2xl border border-amber-300 space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-amber-950">
-                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
-                  <span>Unverified Account</span>
-                </div>
-                <p className="text-[11px] text-stone-700 leading-relaxed">
-                  Verify your @uwaterloo.ca email address to unlock personalized buddy matching.
-                </p>
-              </div>
-            )}
-
-            <div className="text-[11px] text-stone-500 space-y-1">
-              <div className="flex items-center gap-1.5 text-stone-700 font-semibold">
-                <Shield className="w-3.5 h-3.5 text-amber-600" />
-                <span>Privacy Protection</span>
-              </div>
-              <p>
-                Student emails and DOB are never made public. Only your first name, last initial, and optional bio are shown to opted-in event buddies.
+              <p className="text-sm text-muted">
+                {user.faculty}
+                {user.program ? ` · ${user.program}` : ''} · {user.year}
               </p>
             </div>
           </div>
@@ -398,319 +173,290 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onOpenCreateEvent }) => 
           <button
             type="button"
             onClick={() => {
-              if (user.isVerifiedUWStudent) {
-                setVerificationInfoOpen(true);
-              } else {
-                setVerificationModalOpen(true);
-              }
+              setEditName(user.name);
+              setEditFaculty(user.faculty);
+              setEditProgram(user.program);
+              setEditYear(user.year);
+              setEditProfileOpen(true);
             }}
-            className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold transition-colors ${
-              user.isVerifiedUWStudent
-                ? 'bg-stone-100 hover:bg-stone-200 text-stone-800'
-                : 'bg-amber-400 hover:bg-amber-500 text-stone-950 shadow-xs'
-            }`}
+            className="self-start sm:self-center px-3.5 py-2 rounded-2xl border border-line bg-canvas hover:bg-surface-soft text-ink text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
           >
-            {user.isVerifiedUWStudent ? 'View Verification Info' : 'Verify @uwaterloo.ca Now'}
+            <Edit3 className="w-3.5 h-3.5 text-accent-text" />
+            <span>Edit</span>
           </button>
         </div>
-      </div>
 
-      {/* Sub-section Navigation */}
-      <div className="flex items-center p-1 bg-stone-100 rounded-2xl w-fit">
-        <button
-          onClick={() => setActiveSubSection('attending')}
-          className={`px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl transition-all flex items-center gap-2 ${
-            activeSubSection === 'attending'
-              ? 'bg-white text-stone-900 shadow-xs'
-              : 'text-stone-600 hover:text-stone-900'
-          }`}
-        >
-          <Calendar className="w-4 h-4" />
-          <span>Events I&apos;m Attending ({attendingEvents.length})</span>
-        </button>
-
-        <button
-          onClick={() => setActiveSubSection('saved')}
-          className={`px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl transition-all flex items-center gap-2 ${
-            activeSubSection === 'saved'
-              ? 'bg-white text-stone-900 shadow-xs'
-              : 'text-stone-600 hover:text-stone-900'
-          }`}
-        >
-          <Bookmark className="w-4 h-4" />
-          <span>Saved ({savedEvents.length})</span>
-        </button>
-
-        <button
-          onClick={() => setActiveSubSection('created')}
-          className={`px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl transition-all flex items-center gap-2 ${
-            activeSubSection === 'created'
-              ? 'bg-white text-stone-900 shadow-xs'
-              : 'text-stone-600 hover:text-stone-900'
-          }`}
-        >
-          <PlusCircle className="w-4 h-4" />
-          <span>My Created & Drafts ({createdEvents.length})</span>
-        </button>
-      </div>
-
-      {/* SUB-SECTION 1: Events I'm Attending */}
-      {activeSubSection === 'attending' && (
-        <div className="space-y-3">
-          {attendingEvents.length === 0 ? (
-            <div className="p-8 bg-white rounded-3xl border border-stone-200 text-center space-y-2">
-              <Calendar className="w-8 h-8 text-stone-300 mx-auto" />
-              <p className="text-xs sm:text-sm font-semibold text-stone-800">
-                You haven&apos;t marked attendance for any upcoming events
-              </p>
-              <p className="text-xs text-stone-500">
-                Browse the Campus Feed and select &ldquo;I&apos;m Going&rdquo; to opt into events and find buddies.
-              </p>
+        {/* Saved & Going Counts */}
+        <div className="grid grid-cols-2 gap-3 pt-2 border-t border-line">
+          <div className="p-3.5 rounded-2xl bg-canvas border border-line flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-accent-soft text-accent-text flex items-center justify-center shrink-0">
+              <Calendar className="w-4 h-4" />
             </div>
-          ) : (
-            <div className="space-y-3">
-              {attendingEvents.map((ev) => {
-                const isVisibilityOn = attendeeVisibility[ev.id] ?? false;
-                const isCancelled = ev.status === 'cancelled';
+            <div>
+              <p className="font-display text-lg font-bold text-ink leading-none tabular-nums">
+                {activeGoingCount}
+              </p>
+              <p className="text-xs text-muted mt-1">Going</p>
+            </div>
+          </div>
 
+          <div className="p-3.5 rounded-2xl bg-canvas border border-line flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-accent-soft text-accent-text flex items-center justify-center shrink-0">
+              <Bookmark className="w-4 h-4" />
+            </div>
+            <div>
+              <p className="font-display text-lg font-bold text-ink leading-none tabular-nums">
+                {activeSavedCount}
+              </p>
+              <p className="text-xs text-muted mt-1">Saved</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Interests */}
+      <section className="bg-surface rounded-3xl border border-line shadow-soft p-6 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-display text-lg font-bold text-ink">Interests</h2>
+          <button
+            type="button"
+            onClick={() => {
+              setPrefCategories(user.preferences.categories);
+              setEditInterestsOpen(true);
+            }}
+            className="text-xs font-semibold text-accent-text hover:underline cursor-pointer"
+          >
+            Edit
+          </button>
+        </div>
+
+        {user.preferences.categories.length > 0 || (user.personalityQuiz?.hobbies.length ?? 0) > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {user.preferences.categories.map((cat) => (
+              <span
+                key={cat}
+                className="px-3 py-1.5 rounded-xl bg-accent-soft text-ink text-xs font-semibold border border-accent/30"
+              >
+                {cat}
+              </span>
+            ))}
+            {user.personalityQuiz?.hobbies.map((hobby) => (
+              <span
+                key={hobby}
+                className="px-3 py-1.5 rounded-xl bg-canvas text-muted text-xs font-medium border border-line"
+              >
+                {hobby}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-muted">
+            No interests added yet — used only for buddy matching.
+          </p>
+        )}
+      </section>
+
+      {/* Personality Quiz Result */}
+      <section className="bg-surface rounded-3xl border border-line shadow-soft p-6 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-accent-text" />
+            <h2 className="font-display text-lg font-bold text-ink">Buddy Vibe</h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => setQuizModalOpen(true)}
+            className="text-xs font-semibold text-accent-text hover:underline cursor-pointer"
+          >
+            {user.personalityQuiz ? 'Retake' : 'Take quiz'}
+          </button>
+        </div>
+
+        {user.personalityQuiz ? (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div className="p-3.5 rounded-2xl bg-canvas border border-line">
+              <span className="text-[11px] text-muted block">Social energy</span>
+              <span className="font-semibold text-ink capitalize mt-0.5 block">
+                {user.personalityQuiz.socialEnergy}
+              </span>
+            </div>
+            <div className="p-3.5 rounded-2xl bg-canvas border border-line">
+              <span className="text-[11px] text-muted block">Atmosphere</span>
+              <span className="font-semibold text-ink capitalize mt-0.5 block">
+                {user.personalityQuiz.socialEnvironment.replace('_', ' ')}
+              </span>
+            </div>
+            <div className="p-3.5 rounded-2xl bg-canvas border border-line">
+              <span className="text-[11px] text-muted block">Group size</span>
+              <span className="font-semibold text-ink capitalize mt-0.5 block">
+                {user.personalityQuiz.groupSize.replace('_', ' ')}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-muted">
+            Complete the 1-minute quiz to see compatibility scores with potential event buddies.
+          </p>
+        )}
+      </section>
+
+      {/* Simple Buddy Privacy Preference */}
+      <section className="bg-surface rounded-3xl border border-line shadow-soft p-6 flex items-center justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <Shield className="w-4 h-4 text-accent-text mt-0.5 shrink-0" />
+          <div>
+            <h2 className="font-display text-base font-bold text-ink">
+              Buddy privacy
+            </h2>
+            <p className="text-xs text-muted mt-0.5">
+              Share my faculty &amp; year on buddy cards when I opt into matching.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          role="switch"
+          aria-checked={shareAcademicWithBuddies}
+          onClick={handleTogglePrivacyPref}
+          className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 cursor-pointer ${
+            shareAcademicWithBuddies ? 'bg-accent' : 'bg-surface-soft border border-line'
+          }`}
+        >
+          <span
+            className={`block w-5 h-5 rounded-full bg-surface shadow-soft transition-transform ${
+              shareAcademicWithBuddies ? 'translate-x-5' : 'translate-x-0'
+            }`}
+          />
+        </button>
+      </section>
+
+      {/* Blocked users */}
+      <section className="bg-surface rounded-3xl border border-line shadow-soft overflow-hidden">
+        <button
+          type="button"
+          aria-expanded={blockedListOpen}
+          onClick={() => setBlockedListOpen((prev) => !prev)}
+          className="w-full px-6 py-4 flex items-center justify-between gap-3 text-left hover:bg-surface-soft/40 transition-colors cursor-pointer"
+        >
+          <span className="font-display text-base font-bold text-ink">Blocked users</span>
+          <div className="flex items-center gap-2 text-xs text-muted">
+            <span className="tabular-nums font-semibold">{blockedUserIds.length}</span>
+            <ChevronDown
+              className={`w-4 h-4 transition-transform duration-150 ${
+                blockedListOpen ? 'rotate-180' : ''
+              }`}
+            />
+          </div>
+        </button>
+
+        {blockedListOpen && (
+          <div className="px-6 pb-4 pt-2 border-t border-line space-y-2">
+            {blockedUserIds.length === 0 ? (
+              <p className="text-xs text-muted py-1">None.</p>
+            ) : (
+              blockedUserIds.map((id) => {
+                const profile = allAttendees[id];
+                const displayName = profile?.name || 'Student';
+                const avatar = safeMediaUrl(profile?.avatar) || '';
                 return (
                   <div
-                    key={ev.id}
-                    className="p-4 sm:p-5 bg-white rounded-2xl border border-stone-200 hover:border-stone-300 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                    key={id}
+                    className="flex items-center justify-between gap-3 py-1.5"
                   >
-                    <div
-                      onClick={() => setSelectedEventForDetail(ev)}
-                      className="cursor-pointer min-w-0 flex-1 space-y-1"
-                    >
-                      <div className="flex items-center gap-2 text-xs text-stone-500 font-medium">
-                        <span className="text-amber-700 font-bold">{ev.category}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{ev.date} at {ev.startTime}</span>
-                        {isCancelled && (
-                          <span className="text-[10px] bg-red-100 text-red-800 font-bold px-1.5 py-0.2 rounded-md">
-                            Cancelled
-                          </span>
-                        )}
-                      </div>
-                      <h4 className="font-bold text-sm sm:text-base text-stone-900 truncate">
-                        {ev.title}
-                      </h4>
-                      <p className="text-xs text-stone-600 truncate">{ev.location}</p>
-                    </div>
-
-                    {/* Attendance Controls */}
-                    <div className="flex flex-wrap items-center gap-3 pt-2 sm:pt-0 border-t sm:border-t-0 border-stone-100">
-                      {/* Buddy visibility status */}
-                      {!ev.isResearchStudy && !isCancelled && (
-                        <div>
-                          {isVisibilityOn ? (
-                            <div className="flex items-center gap-1.5 bg-amber-100 text-stone-950 px-3 py-1.5 rounded-xl border border-amber-300 text-xs font-bold">
-                              <Eye className="w-3.5 h-3.5 text-amber-700" />
-                              <span>Buddy visible</span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  disableBuddyMatching(ev.id);
-                                  setActionNotice(`Turned off buddy visibility for "${ev.title}".`);
-                                  setTimeout(() => setActionNotice(''), 3000);
-                                }}
-                                className="ml-1 text-[11px] text-red-700 hover:underline font-medium"
-                              >
-                                (Turn off)
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => setSelectedEventForDetail(ev)}
-                              className="flex items-center gap-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 px-3 py-1.5 rounded-xl border border-stone-200 text-xs font-medium"
-                            >
-                              <EyeOff className="w-3.5 h-3.5 text-stone-400" />
-                              <span>Buddy matching off</span>
-                            </button>
-                          )}
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      {avatar ? (
+                        <img
+                          src={avatar}
+                          alt={displayName}
+                          referrerPolicy="no-referrer"
+                          className="w-8 h-8 rounded-full object-cover shrink-0 bg-surface-soft"
+                        />
+                      ) : (
+                        <div className="w-8 h-8 rounded-full bg-surface-soft text-ink text-xs font-semibold flex items-center justify-center shrink-0">
+                          {displayName.charAt(0)}
                         </div>
                       )}
-
-                      <button
-                        onClick={() => toggleGoing(ev.id)}
-                        className="text-xs text-red-600 hover:text-red-800 hover:underline font-medium px-2 py-1"
-                      >
-                        Remove Attendance
-                      </button>
+                      <span className="text-xs font-semibold text-ink truncate">
+                        {displayName}
+                      </span>
                     </div>
-
+                    <button
+                      type="button"
+                      onClick={() => {
+                        unblockUser(id);
+                        showNotice('Unblocked.');
+                      }}
+                      className="px-3 py-1.5 rounded-xl border border-line bg-canvas hover:bg-surface-soft text-xs font-semibold text-ink transition-colors cursor-pointer shrink-0"
+                    >
+                      Unblock
+                    </button>
                   </div>
                 );
-              })}
-            </div>
-          )}
-        </div>
-      )}
+              })
+            )}
+          </div>
+        )}
+      </section>
 
-      {/* SUB-SECTION 2: Saved Events */}
-      {activeSubSection === 'saved' && (
-        <div className="space-y-3">
-          {savedEvents.length === 0 ? (
-            <div className="p-8 bg-white rounded-3xl border border-stone-200 text-center space-y-2">
-              <Bookmark className="w-8 h-8 text-stone-300 mx-auto" />
-              <p className="text-xs sm:text-sm font-semibold text-stone-800">
-                No saved events yet
-              </p>
-              <p className="text-xs text-stone-500">
-                Click the bookmark button on any event card to save it for later.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {savedEvents.map((ev) => (
-                <div
-                  key={ev.id}
-                  className="p-4 sm:p-5 bg-white rounded-2xl border border-stone-200 hover:border-stone-300 transition-colors flex items-center justify-between gap-4"
-                >
-                  <div
-                    onClick={() => setSelectedEventForDetail(ev)}
-                    className="cursor-pointer min-w-0 flex-1 space-y-1"
-                  >
-                    <div className="flex items-center gap-2 text-xs text-stone-500">
-                      <span className="text-amber-700 font-bold">{ev.category}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{ev.date}</span>
-                    </div>
-                    <h4 className="font-bold text-sm sm:text-base text-stone-900 truncate">
-                      {ev.title}
-                    </h4>
-                    <p className="text-xs text-stone-600 truncate">{ev.location}</p>
-                  </div>
+      {/* Account Actions */}
+      <div className="flex items-center justify-between px-1 pt-1 text-xs">
+        <button
+          type="button"
+          onClick={() => {
+            resetDemoData();
+            showNotice('Demo state restored.');
+          }}
+          className="text-muted hover:text-ink font-medium flex items-center gap-1.5 cursor-pointer"
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+          <span>Reset demo data</span>
+        </button>
 
-                  <button
-                    onClick={() => toggleSaveEvent(ev.id)}
-                    className="p-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50 rounded-xl"
-                    title="Remove from saved"
-                  >
-                    <Bookmark className="w-4 h-4 fill-amber-400 text-amber-500" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* SUB-SECTION 3: My Created Events & Drafts */}
-      {activeSubSection === 'created' && (
-        <div className="space-y-3">
-          {createdEvents.length === 0 ? (
-            <div className="p-8 bg-white rounded-3xl border border-stone-200 text-center space-y-2">
-              <PlusCircle className="w-8 h-8 text-stone-300 mx-auto" />
-              <p className="text-xs sm:text-sm font-semibold text-stone-800">
-                You haven&apos;t created any events or drafts
-              </p>
-              <p className="text-xs text-stone-500">
-                Head over to the &ldquo;Create Event&rdquo; tab to post an event for your club or group.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {createdEvents.map((ev) => (
-                <div
-                  key={ev.id}
-                  className="p-4 sm:p-5 bg-white rounded-2xl border border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-                >
-                  <div
-                    onClick={() => setSelectedEventForDetail(ev)}
-                    className="cursor-pointer min-w-0 flex-1 space-y-1"
-                  >
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className={`px-2 py-0.5 rounded-md font-bold text-[10px] ${
-                        ev.status === 'published'
-                          ? 'bg-amber-400/20 text-stone-950 border border-amber-300'
-                          : ev.status === 'draft'
-                          ? 'bg-stone-200 text-stone-800'
-                          : 'bg-red-100 text-red-900'
-                      }`}>
-                        {ev.status.toUpperCase()}
-                      </span>
-                      <span className="text-stone-400">·</span>
-                      <span className="text-stone-500">{ev.category}</span>
-                    </div>
-                    <h4 className="font-bold text-sm sm:text-base text-stone-900 truncate">
-                      {ev.title}
-                    </h4>
-                    <p className="text-xs text-stone-600 truncate">{ev.date} · {ev.location}</p>
-                  </div>
-
-                  <div className="flex items-center gap-2 self-end sm:self-center">
-                    {ev.status !== 'cancelled' && (
-                      <button
-                        onClick={() => {
-                          if (window.confirm(`Are you sure you want to cancel "${ev.title}"? Attendees will be informed.`)) {
-                            cancelEvent(ev.id);
-                            setActionNotice(`Event "${ev.title}" has been marked as cancelled.`);
-                            setTimeout(() => setActionNotice(''), 3000);
-                          }
-                        }}
-                        className="px-3 py-1.5 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-semibold"
-                      >
-                        Cancel Event
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+        <button
+          type="button"
+          onClick={logout}
+          className="text-danger hover:underline font-semibold flex items-center gap-1.5 cursor-pointer"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          <span>Sign out</span>
+        </button>
+      </div>
 
       {/* Edit Profile Modal */}
       {editProfileOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-stone-100 relative max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-xs">
+          <div className="bg-surface rounded-3xl max-w-md w-full p-6 shadow-lift border border-line relative">
             <button
+              type="button"
               onClick={() => setEditProfileOpen(false)}
-              className="absolute top-5 right-5 p-2 text-stone-400 hover:text-stone-700 rounded-full"
+              className="absolute top-4 right-4 p-2 text-muted hover:text-ink rounded-full cursor-pointer"
+              aria-label="Close edit profile"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4" />
             </button>
 
             <form onSubmit={handleSaveProfile} className="space-y-4">
-              <h3 className="text-lg font-bold text-stone-900">Edit Student Profile</h3>
+              <h3 className="font-display text-lg font-bold text-ink">Edit Profile</h3>
 
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Full Name *
-                </label>
+                <label className="block text-xs font-semibold text-muted mb-1">Full Name</label>
                 <input
                   type="text"
                   required
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
-                  className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-stone-200"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Profile Avatar URL
-                </label>
-                <input
-                  type="url"
-                  value={editAvatar}
-                  onChange={(e) => setEditAvatar(e.target.value)}
-                  className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-stone-200"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-2xl border border-line bg-canvas text-ink focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Faculty
-                  </label>
+                  <label className="block text-xs font-semibold text-muted mb-1">Faculty</label>
                   <select
                     value={editFaculty}
                     onChange={(e) => setEditFaculty(e.target.value)}
-                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-stone-200 bg-white"
+                    className="w-full px-3 py-2.5 text-xs rounded-2xl border border-line bg-canvas text-ink focus:outline-none focus:ring-2 focus:ring-accent"
                   >
                     {UW_FACULTIES.map((f) => (
                       <option key={f} value={f}>{f}</option>
@@ -719,13 +465,11 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onOpenCreateEvent }) => 
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Year of Study
-                  </label>
+                  <label className="block text-xs font-semibold text-muted mb-1">Year</label>
                   <select
                     value={editYear}
                     onChange={(e) => setEditYear(e.target.value)}
-                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-stone-200 bg-white"
+                    className="w-full px-3 py-2.5 text-xs rounded-2xl border border-line bg-canvas text-ink focus:outline-none focus:ring-2 focus:ring-accent"
                   >
                     {STUDY_YEARS.map((y) => (
                       <option key={y} value={y}>{y}</option>
@@ -735,42 +479,12 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onOpenCreateEvent }) => 
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Program
-                </label>
+                <label className="block text-xs font-semibold text-muted mb-1">Program</label>
                 <input
                   type="text"
                   value={editProgram}
                   onChange={(e) => setEditProgram(e.target.value)}
-                  className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-stone-200"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Bio
-                </label>
-                <textarea
-                  rows={2}
-                  value={editBio}
-                  onChange={(e) => setEditBio(e.target.value)}
-                  className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-stone-200 resize-none"
-                />
-              </div>
-
-              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200/80 text-xs space-y-1">
-                <span className="font-semibold text-amber-900 flex items-center gap-1">
-                  <Shield className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Private Account Information</span>
-                </span>
-                <label className="block text-[11px] text-stone-600">
-                  Date of birth (Private)
-                </label>
-                <input
-                  type="date"
-                  value={editDob}
-                  onChange={(e) => setEditDob(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded-lg border border-amber-200 bg-white text-xs"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-2xl border border-line bg-canvas text-ink focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
 
@@ -778,15 +492,15 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onOpenCreateEvent }) => 
                 <button
                   type="button"
                   onClick={() => setEditProfileOpen(false)}
-                  className="px-4 py-2 text-xs font-medium text-stone-600"
+                  className="px-4 py-2 text-xs font-semibold text-muted hover:text-ink cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-amber-400 hover:bg-amber-500 text-stone-950 rounded-xl text-xs font-bold shadow-xs transition-all"
+                  className="px-5 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-2xl text-xs font-bold shadow-soft cursor-pointer"
                 >
-                  Save Profile
+                  Save
                 </button>
               </div>
             </form>
@@ -794,94 +508,61 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onOpenCreateEvent }) => 
         </div>
       )}
 
-      {/* Edit Preferences Modal */}
-      {editPrefsOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-stone-100 relative max-h-[90vh] overflow-y-auto">
+      {/* Edit Interests Modal */}
+      {editInterestsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-xs">
+          <div className="bg-surface rounded-3xl max-w-md w-full p-6 shadow-lift border border-line relative">
             <button
-              onClick={() => setEditPrefsOpen(false)}
-              className="absolute top-5 right-5 p-2 text-stone-400 hover:text-stone-700 rounded-full"
+              type="button"
+              onClick={() => setEditInterestsOpen(false)}
+              className="absolute top-4 right-4 p-2 text-muted hover:text-ink rounded-full cursor-pointer"
+              aria-label="Close edit interests"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4" />
             </button>
 
-            <form onSubmit={handleSavePreferences} className="space-y-4">
-              <h3 className="text-lg font-bold text-stone-900">Edit Recommendations</h3>
-              <p className="text-xs text-stone-600 leading-normal">
-                Personalizes your &ldquo;For You&rdquo; campus feed. You can still view all events anytime.
-              </p>
-
-              <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-semibold text-stone-900">Show everything</p>
-                  <p className="text-[11px] text-stone-500">Clear custom selections.</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPrefNoPreferences(true);
-                    setPrefCategories([]);
-                    setPrefFaculties([]);
-                    setPrefYears([]);
-                  }}
-                  className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
-                    prefNoPreferences
-                      ? 'bg-stone-950 text-amber-300 font-bold'
-                      : 'bg-white border border-stone-300 text-stone-700 hover:bg-stone-50'
-                  }`}
-                >
-                  No preferences
-                </button>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-2">
-                  Event Categories
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  {EVENT_CATEGORIES.map((cat) => {
-                    const isSelected = prefCategories.includes(cat as EventCategory);
-                    return (
-                      <button
-                        key={cat}
-                        type="button"
-                        onClick={() => {
-                          if (prefNoPreferences) setPrefNoPreferences(false);
-                          setPrefCategories((prev) =>
-                            prev.includes(cat as EventCategory)
-                              ? prev.filter((c) => c !== cat)
-                              : [...prev, cat as EventCategory]
-                          );
-                        }}
-                        className={`text-left p-2.5 rounded-xl border text-xs font-medium flex items-center justify-between transition-colors ${
-                          isSelected && !prefNoPreferences
-                            ? 'bg-amber-400/15 border-amber-400 text-stone-950 font-bold'
-                            : 'bg-white border-stone-200 text-stone-700 hover:border-stone-300'
-                        }`}
-                      >
-                        <span className="truncate pr-1">{cat}</span>
-                        {isSelected && !prefNoPreferences && (
-                          <Check className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
+            <form onSubmit={handleSaveInterests} className="space-y-4">
+              <h3 className="font-display text-lg font-bold text-ink">Select Interests</h3>
+              <div className="grid grid-cols-2 gap-2">
+                {EVENT_CATEGORIES.map((cat) => {
+                  const isSelected = prefCategories.includes(cat as EventCategory);
+                  return (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() =>
+                        setPrefCategories((prev) =>
+                          prev.includes(cat as EventCategory)
+                            ? prev.filter((c) => c !== cat)
+                            : [...prev, cat as EventCategory]
+                        )
+                      }
+                      className={`text-left p-2.5 rounded-2xl border text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
+                        isSelected
+                          ? 'bg-accent-soft border-accent text-ink'
+                          : 'bg-canvas border-line text-muted hover:text-ink'
+                      }`}
+                    >
+                      <span className="truncate pr-1">{cat}</span>
+                      {isSelected && <Check className="w-3.5 h-3.5 text-accent-text shrink-0" />}
+                    </button>
+                  );
+                })}
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setEditPrefsOpen(false)}
-                  className="px-4 py-2 text-xs font-medium text-stone-600"
+                  onClick={() => setEditInterestsOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold text-muted hover:text-ink cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-amber-400 hover:bg-amber-500 text-stone-950 rounded-xl text-xs font-bold shadow-xs transition-all"
+                  className="px-5 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-2xl text-xs font-bold shadow-soft cursor-pointer"
                 >
-                  Update Preferences
+                  Save
                 </button>
               </div>
             </form>
@@ -889,207 +570,17 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onOpenCreateEvent }) => 
         </div>
       )}
 
-      {/* Account Settings & Privacy Reassurance Modal */}
-      {accountSettingsOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-stone-100 relative space-y-5">
-            <button
-              onClick={() => setAccountSettingsOpen(false)}
-              className="absolute top-5 right-5 p-2 text-stone-400 hover:text-stone-700 rounded-full"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            <div>
-              <div className="flex items-center gap-2 text-stone-900">
-                <Settings className="w-5 h-5 text-amber-600" />
-                <h3 className="text-lg font-bold">Account & Privacy Settings</h3>
-              </div>
-              <p className="text-xs text-stone-500 mt-0.5">
-                Manage your credentials and local demo simulation state.
-              </p>
-            </div>
-
-            {/* Confidential Data Box */}
-            <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200 space-y-2.5 text-xs">
-              <div className="flex items-center gap-1.5 font-bold text-stone-800">
-                <Shield className="w-4 h-4 text-amber-600" />
-                <span>Strictly Private Information</span>
-              </div>
-              <div className="space-y-1">
-                <p className="text-stone-600">
-                  <span className="font-semibold text-stone-700">Account Email:</span> {user.email}
-                </p>
-                <p className="text-stone-600">
-                  <span className="font-semibold text-stone-700">Date of Birth:</span> {user.dob || 'Not specified'}
-                </p>
-              </div>
-              <p className="text-[11px] text-stone-500 pt-1 border-t border-stone-200/60">
-                These fields are never exposed on your public profile or shared with event organizers or other students.
-              </p>
-            </div>
-
-            {/* Blocked Users Section - Requirement 4 */}
-            <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200 space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5 font-bold text-stone-800">
-                  <Ban className="w-4 h-4 text-stone-600" />
-                  <span>Blocked Users ({blockedUserIds.length})</span>
-                </div>
-              </div>
-              <p className="text-[11px] text-stone-500">
-                Blocked users cannot send you buddy requests or see your attendance.
-              </p>
-
-              {blockedUserIds.length === 0 ? (
-                <p className="text-[11px] text-stone-400 italic">No blocked users.</p>
-              ) : (
-                <div className="space-y-1.5 pt-1">
-                  {blockedUserIds.map((bId) => {
-                    const attendee = allAttendees[bId];
-                    const name = attendee ? attendee.name : `User ${bId}`;
-                    return (
-                      <div
-                        key={bId}
-                        className="flex items-center justify-between p-2 bg-white rounded-xl border border-stone-200"
-                      >
-                        <span className="font-semibold text-stone-900">{name}</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            unblockUser(bId);
-                            setActionNotice(`Unblocked ${name}.`);
-                            setTimeout(() => setActionNotice(''), 3000);
-                          }}
-                          className="text-[11px] font-bold text-amber-800 hover:text-amber-950 underline"
-                        >
-                          Unblock
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Reset Demo Data */}
-            <div className="p-4 bg-amber-500/10 rounded-2xl border border-amber-300 space-y-2">
-              <div className="flex items-center gap-2 text-xs font-bold text-amber-950">
-                <RotateCcw className="w-4 h-4 text-amber-700" />
-                <span>Reset Demo Simulation State</span>
-              </div>
-              <p className="text-xs text-stone-600 leading-normal">
-                Restores initial sample events, resets buddy requests, and clears any local prototype blocks.
-              </p>
-              <button
-                type="button"
-                onClick={handleResetData}
-                className="w-full py-2 px-3 bg-white hover:bg-stone-50 text-stone-950 font-bold text-xs rounded-xl border border-stone-300 shadow-2xs transition-colors"
-              >
-                Reset All Demo Data
-              </button>
-            </div>
-
-            <div className="pt-2 flex items-center justify-between border-t border-stone-100">
-              <button
-                type="button"
-                onClick={() => {
-                  logout();
-                  setAccountSettingsOpen(false);
-                }}
-                className="text-xs text-red-600 hover:text-red-800 font-semibold flex items-center gap-1.5"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Log Out</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setAccountSettingsOpen(false)}
-                className="px-4 py-2 bg-stone-900 text-white rounded-xl text-xs font-semibold"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Demo Verification Info Modal - Requirement 7 */}
-      {verificationInfoOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-stone-100 relative space-y-4">
-            <button
-              onClick={() => setVerificationInfoOpen(false)}
-              className="absolute top-4 right-4 p-2 text-stone-400 hover:text-stone-700 rounded-full"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            <div className="flex items-center gap-2">
-              <Shield className="w-5 h-5 text-amber-600" />
-              <h3 className="font-bold text-base text-stone-900">
-                About &ldquo;Demo Verification&rdquo;
-              </h3>
-            </div>
-
-            <div className="p-3.5 bg-amber-50 rounded-2xl border border-amber-200 text-xs space-y-2 text-stone-800">
-              <p className="font-bold text-amber-950">
-                How Email Verification Works:
-              </p>
-              <p className="leading-relaxed">
-                In a future production version of WatHive, users would be required to verify their @uwaterloo.ca email address with a one-time passcode.
-              </p>
-              <p className="leading-relaxed">
-                <strong className="text-stone-950">Important clarification:</strong> Email verification only confirms that an account holder had active access to a University of Waterloo email inbox. It does <strong>not</strong> verify an individual&apos;s identity, background, intentions, or personal trustworthiness.
-              </p>
-              <p className="leading-relaxed text-stone-600 italic">
-                WatHive strictly avoids labels such as &ldquo;Safe user&rdquo; or &ldquo;Trusted buddy.&rdquo; We encourage meeting in public campus locations and you can disconnect or block at any time.
-              </p>
-            </div>
-
-            <div className="flex justify-end pt-1">
-              <button
-                type="button"
-                onClick={() => setVerificationInfoOpen(false)}
-                className="px-4 py-2 bg-stone-950 text-amber-300 font-bold rounded-xl text-xs"
-              >
-                Understood
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Selected Event Detail Modal */}
-      {selectedEventForDetail && (
-        <EventDetailModal
-          isOpen={Boolean(selectedEventForDetail)}
-          event={selectedEventForDetail}
-          onClose={() => setSelectedEventForDetail(null)}
-        />
-      )}
-
-      {/* UW Verification Modal */}
       <UWVerificationModal
         isOpen={verificationModalOpen}
         onClose={() => setVerificationModalOpen(false)}
-        onSuccess={() => {
-          setActionNotice("Account verified as University of Waterloo student! Buddy matching is now available.");
-          setTimeout(() => setActionNotice(''), 3500);
-        }}
+        onSuccess={() => showNotice('Verified as University of Waterloo student!')}
       />
 
-      {/* Personality & Interests Quiz Modal */}
       <PersonalityQuizModal
         isOpen={quizModalOpen}
         onClose={() => setQuizModalOpen(false)}
-        onSuccess={() => {
-          setActionNotice("Personality & interests profile updated! Compatibility scores recalculated.");
-          setTimeout(() => setActionNotice(''), 3500);
-        }}
+        onSuccess={() => showNotice('Buddy vibe updated!')}
       />
     </div>
   );
 };
-

@@ -1,4 +1,5 @@
 import { WusaStoredEvent } from './types.js';
+import { sanitizeHttpUrl, stripHtmlToText, capString } from './htmlParser.js';
 
 /**
  * Known Waterloo venues to coordinates lookup
@@ -84,15 +85,31 @@ function getDefaultCoverImage(category: string): string {
   }
 }
 
+const DIRECT_WATHIVE_CATEGORIES = new Set([
+  'Arts and culture',
+  'Technology',
+  'Career and networking',
+  'Sports and recreation',
+  'Social events',
+  'Volunteering',
+  'Academic workshops',
+  'Research participation'
+]);
+
 /**
- * Transforms a WUSA stored event into the exact EventItem schema consumed by WatHive
+ * Transforms a WUSA or community stored event into the exact EventItem schema consumed by WatHive
  */
 export function mapToWatHiveEventItem(stored: WusaStoredEvent): any {
-  const { category, organizerType } = mapWusaCategoryToWatHive(stored.category);
+  const isCommunity = stored.source === 'community_sheet' || stored.source === 'community_ics';
+  const mappedWusa = mapWusaCategoryToWatHive(stored.category);
+  const category = isCommunity && DIRECT_WATHIVE_CATEGORIES.has(stored.category)
+    ? (stored.category as ReturnType<typeof mapWusaCategoryToWatHive>['category'])
+    : mappedWusa.category;
+  const organizerType = isCommunity ? 'Clubs' : mappedWusa.organizerType;
 
   // Parse start date & time
   const [datePart, timePart] = stored.start_date.split(' ');
-  const startTime = timePart ? timePart.slice(0, 5) : '00:00';
+  const startTime = stored.all_day ? '00:00' : (timePart ? timePart.slice(0, 5) : '00:00');
 
   let endDatePart: string | undefined;
   let endTime = '23:59';
@@ -101,13 +118,21 @@ export function mapToWatHiveEventItem(stored: WusaStoredEvent): any {
     if (parsedEndDate && parsedEndDate > datePart) {
       endDatePart = parsedEndDate;
     }
-    if (endTimePart) {
+    if (stored.all_day) {
+      endTime = '23:59';
+    } else if (endTimePart) {
       endTime = endTimePart.slice(0, 5);
     }
   }
 
-  const isFree = !stored.cost || stored.cost.toLowerCase().includes('free') || stored.cost === '$0' || stored.cost === '$0.00';
-  const priceDisplay = isFree ? 'Free' : (stored.cost || 'Free');
+  const normalizedCost = (stored.cost || '').trim().toLowerCase();
+  const isFree =
+    !normalizedCost ||
+    normalizedCost === 'free' ||
+    normalizedCost.includes('free') ||
+    normalizedCost === '$0' ||
+    normalizedCost === '$0.00';
+  const priceDisplay = isFree ? 'Free' : (stored.cost || 'Paid');
 
   // Status mapping
   let status: 'published' | 'draft' | 'cancelled' | 'ended' = 'published';
@@ -121,18 +146,37 @@ export function mapToWatHiveEventItem(stored: WusaStoredEvent): any {
     ? { lat: stored.venue.latitude, lng: stored.venue.longitude }
     : resolveCoordinates(stored.venue?.name, stored.venue?.address);
 
-  const coverImage = stored.source_image_url || getDefaultCoverImage(category);
+  const safeImage = sanitizeHttpUrl(stored.source_image_url);
+  const coverImage = safeImage || getDefaultCoverImage(category);
+  const safeOriginalUrl = isCommunity
+    ? (sanitizeHttpUrl(stored.original_wusa_url) || '')
+    : (sanitizeHttpUrl(stored.original_wusa_url) || 'https://wusa.ca/events/');
+  const safeRegUrl = isCommunity
+    ? (sanitizeHttpUrl(stored.registration_url) || '')
+    : (sanitizeHttpUrl(stored.registration_url) || safeOriginalUrl);
+  const plainDescription = capString(
+    stripHtmlToText(stored.description_text || stored.description || ''),
+    10_000
+  );
+
+  const moderationStatus: 'approved' | 'rejected' | 'pending_review' = isCommunity
+    ? (stored.approval_status === 'approved'
+        ? 'approved'
+        : stored.approval_status === 'rejected'
+          ? 'rejected'
+          : 'pending_review')
+    : (stored.approval_status === 'rejected' ? 'rejected' : 'approved');
 
   return {
-    id: `wusa_${stored.id}`,
-    title: stored.title,
+    id: isCommunity ? stored.id : `wusa_${stored.id}`,
+    title: capString(stored.title, 300),
     coverImage,
-    organizer: stored.organizer?.name || 'Waterloo Undergraduate Student Association',
+    organizer: stored.organizer?.name || (isCommunity ? 'Campus Club' : 'Waterloo Undergraduate Student Association'),
     organizerType,
     isOrganizationAccount: true,
     category,
     facultyAffiliation: 'All Faculties',
-    description: stored.description_text || stored.description,
+    description: plainDescription,
     date: datePart,
     endDate: endDatePart,
     startTime,
@@ -147,21 +191,22 @@ export function mapToWatHiveEventItem(stored: WusaStoredEvent): any {
     isFree,
     price: priceDisplay,
     eligibility: 'Open to all University of Waterloo undergraduate students',
-    registrationUrl: stored.registration_url || stored.original_wusa_url,
+    registrationUrl: safeRegUrl,
     registrationDeadline: stored.registration_deadline || undefined,
     isResearchStudy: false,
-    creatorId: 'system_wusa_collector',
+    creatorId: isCommunity ? 'system_community_collector' : 'system_wusa_collector',
     status,
-    sourceVerification: 'wusa_official',
-    moderationStatus: stored.approval_status === 'approved' ? 'approved' : 'approved', // Pre-approved for display
-    isExternalConfirmedTicket: Boolean(stored.registration_url),
-    utcIsoString: stored.start_iso,
+    sourceVerification: isCommunity ? 'community_partner' : 'wusa_official',
+    moderationStatus,
+    isExternalConfirmedTicket: Boolean(sanitizeHttpUrl(stored.registration_url)),
+    utcIsoString: stored.start_utc || stored.start_iso,
+    endUtcIso: stored.end_utc || stored.end_iso || undefined,
     createdAt: stored.first_imported_at,
     
     // Metadata for transparency
     _wusaMeta: {
       sourceEventId: stored.id,
-      canonicalUrl: stored.original_wusa_url,
+      canonicalUrl: safeOriginalUrl,
       temporalStatus: stored.temporal_status,
       isRecurring: stored.is_recurring,
       seriesId: stored.series_id,

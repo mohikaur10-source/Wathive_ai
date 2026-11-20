@@ -1,5 +1,5 @@
 import { EventItem } from '../types';
-import { WATERLOO_TIMEZONE } from './timeZone';
+import { getTorontoNow } from './timeZone';
 
 export type DateRangePreset =
   | 'all'
@@ -21,19 +21,7 @@ export interface DateRangeResolution {
  * Returns today's calendar date (YYYY-MM-DD) in Waterloo local time (America/Toronto).
  */
 export function getWaterlooTodayStr(now: Date = new Date()): string {
-  try {
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone: WATERLOO_TIMEZONE,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit'
-    }).format(now);
-  } catch {
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, '0');
-    const d = String(now.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }
+  return getTorontoNow(now).dateStr;
 }
 
 /**
@@ -129,14 +117,16 @@ export function resolveDateRange(
         exactLabel: formatExactDateRange(monday, sunday),
         isFiltered: true
       };
-    case 'thisWeekend':
+    case 'thisWeekend': {
+      const weekendStart = todayStr > saturday ? todayStr : saturday;
       return {
         preset,
-        start: saturday,
+        start: weekendStart,
         end: sunday,
-        exactLabel: formatExactDateRange(saturday, sunday),
+        exactLabel: formatExactDateRange(weekendStart, sunday),
         isFiltered: true
       };
+    }
     case 'nextWeek':
       return {
         preset,

@@ -4,11 +4,20 @@ import { CollectorConfig, SyncRun } from './types.js';
 
 export class CollectorScheduler {
   private timer: NodeJS.Timeout | null = null;
+  private sweepTimer: NodeJS.Timeout | null = null;
   private nextRunAt: Date | null = null;
   private isEnabled = true;
 
   constructor() {
     this.scheduleNext();
+    this.sweepTimer = setInterval(() => {
+      try {
+        db.archivePastEvents();
+      } catch (err) {
+        console.warn('[CollectorScheduler] Hourly archive sweep failed:', err);
+      }
+    }, 60 * 60 * 1000);
+    this.sweepTimer.unref();
   }
 
   public getStatus() {
@@ -31,6 +40,14 @@ export class CollectorScheduler {
 
   public triggerManualSync(): Promise<SyncRun> {
     return collector.executeSync('manual');
+  }
+
+  public runInitialSyncOnStart() {
+    if (!this.isEnabled || collector.isBusy()) return;
+    console.log('[CollectorScheduler] Triggering non-blocking initial WUSA sync on server start...');
+    void collector.executeSync('scheduled').catch((err: any) => {
+      console.warn('[CollectorScheduler] Initial startup sync skipped/offline:', err?.message || err);
+    });
   }
 
   private scheduleNext() {

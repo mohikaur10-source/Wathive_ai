@@ -1,27 +1,19 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  MessageSquare,
-  Users,
   Send,
   Calendar,
-  MapPin,
-  ExternalLink,
-  Shield,
-  Ban,
-  Flag,
-  Sparkles,
   ArrowLeft,
-  Check,
+  MoreHorizontal,
   X,
-  AlertCircle,
-  Clock,
-  UserX,
-  Heart,
-  Lock,
-  RotateCcw
+  ChevronDown,
+  ChevronUp,
+  Check
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { Conversation, ConnectionRequest, AttendeeProfile } from '../../types';
+import { AttendeeProfile } from '../../types';
+import { getTorontoNow } from '../../utils/timeZone';
+import { safeMediaUrl } from '../../utils/urlSafety';
+import { Goose } from '../common/Goose';
 import { ReportModal } from '../common/ReportModal';
 import { EventDetailModal } from '../feed/EventDetailModal';
 
@@ -29,45 +21,142 @@ interface MessagesTabProps {
   onViewEvent?: (eventId: string) => void;
 }
 
-export const MessagesTab: React.FC<MessagesTabProps> = ({ onViewEvent }) => {
+const SAFETY_NOTE_STORAGE_KEY = 'wathive_chat_safety_dismissed';
+
+const getFirstName = (fullName: string) => fullName.trim().split(/\s+/)[0] || fullName;
+
+export const MessagesTab: React.FC<MessagesTabProps> = () => {
   const {
     user,
+    upcomingEvents,
+    allAttendees,
     conversations,
     connectionRequests,
     respondConnectionRequest,
     withdrawConnectionRequest,
     chatMessages,
     sendMessage,
-    disconnectConversation,
-    toggleStayConnected,
-    simulatePartnerStayConnected,
-    toggleChatPostEventClosed,
-    toggleSimulateEventEnded,
-    events,
+    removeConversations,
+    blockUser,
     dailyBuddyRequestsCount,
     maxDailyRequests
   } = useApp();
 
   const [activeSubTab, setActiveSubTab] = useState<'conversations' | 'requests'>('conversations');
-  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(
-    conversations.length > 0 ? conversations[0].id : null
-  );
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined' && window.innerWidth >= 768 && conversations.length > 0) {
+      return conversations[0].id;
+    }
+    return null;
+  });
   const [inputText, setInputText] = useState('');
+  const [expandedRequestIds, setExpandedRequestIds] = useState<Record<string, boolean>>({});
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [reportTarget, setReportTarget] = useState<{ type: 'user'; attendee: AttendeeProfile } | null>(null);
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [viewingEventId, setViewingEventId] = useState<string | null>(null);
-  const [disconnectConfirmOpen, setDisconnectConfirmOpen] = useState(false);
-  const [statusToast, setStatusToast] = useState('');
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
+  const [blockTarget, setBlockTarget] = useState<{ id: string; name: string } | null>(null);
+  const [toastMessage, setToastMessage] = useState('');
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [safetyDismissed, setSafetyDismissed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SAFETY_NOTE_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
 
-  // Incoming requests to me
-  const incomingRequests = connectionRequests.filter(
-    (r) => r.recipientId === user?.id
+  const menuContainerRef = useRef<HTMLDivElement | null>(null);
+  const chatHeaderMenuBtnRef = useRef<HTMLButtonElement | null>(null);
+  const lastTriggerRef = useRef<HTMLElement | null>(null);
+  const chatListRef = useRef<HTMLDivElement | null>(null);
+  const prevConversationsRef = useRef(conversations);
+  const toastTimerRef = useRef<number | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage('');
+      toastTimerRef.current = null;
+    }, 3200);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Keep selectedConversationId valid whenever conversations shrink (leave / block / report / cross-tab)
+  useEffect(() => {
+    const prevConvs = prevConversationsRef.current;
+    prevConversationsRef.current = conversations;
+
+    if (!selectedConversationId) return;
+    const stillExists = conversations.some((c) => c.id === selectedConversationId);
+    if (stillExists) return;
+
+    const isDesktop = typeof window !== 'undefined' && window.innerWidth >= 768;
+    if (!isDesktop || conversations.length === 0) {
+      setSelectedConversationId(null);
+      window.setTimeout(() => chatListRef.current?.focus(), 0);
+      return;
+    }
+
+    const prevIdx = prevConvs.findIndex((c) => c.id === selectedConversationId);
+    const nextIdx = Math.min(prevIdx >= 0 ? prevIdx : 0, conversations.length - 1);
+    setSelectedConversationId(conversations[nextIdx]?.id ?? null);
+  }, [conversations, selectedConversationId]);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (menuContainerRef.current && !menuContainerRef.current.contains(e.target as Node)) {
+        setOpenMenuId(null);
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpenMenuId(null);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [openMenuId]);
+
+  // Esc handling & focus restoration for Leave / Block confirmation dialogs
+  useEffect(() => {
+    if (!leaveConfirmOpen && !blockTarget) return;
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setLeaveConfirmOpen(false);
+        setBlockTarget(null);
+        setIsConfirming(false);
+        window.setTimeout(() => lastTriggerRef.current?.focus(), 0);
+      }
+    };
+    document.addEventListener('keydown', handleEsc);
+    return () => document.removeEventListener('keydown', handleEsc);
+  }, [leaveConfirmOpen, blockTarget]);
+
+  const incomingPendingRequests = connectionRequests.filter(
+    (r) => r.recipientId === user?.id && r.status === 'pending'
   );
-
-  // Outgoing requests sent by me
   const outgoingRequests = connectionRequests.filter(
     (r) => r.senderId === user?.id
   );
+  const pendingIncomingCount = incomingPendingRequests.length;
 
   const selectedConversation = conversations.find(
     (c) => c.id === selectedConversationId
@@ -77,574 +166,584 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ onViewEvent }) => {
     ? chatMessages[selectedConversationId] || []
     : [];
 
-  // Associated event for the selected conversation
-  const currentEvent = selectedConversation
-    ? events.find((e) => e.id === selectedConversation.eventId)
+  const torontoTodayStr = getTorontoNow().dateStr;
+
+  const linkedUpcomingEvent = selectedConversation
+    ? upcomingEvents.find((e) => e.id === selectedConversation.eventId) || null
     : null;
 
-  const isEventEnded = currentEvent?.status === 'ended';
+  const isEventEnded = Boolean(
+    selectedConversation &&
+      !linkedUpcomingEvent &&
+      (selectedConversation.eventDate < torontoTodayStr || !selectedConversation.eventDate)
+  );
 
-  const handleSendMessage = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
+  const viewingEvent = viewingEventId
+    ? upcomingEvents.find((e) => e.id === viewingEventId) || null
+    : null;
+
+  const isBrandNewChat = Boolean(
+    selectedConversation &&
+      currentMessages.length <= 2 &&
+      !selectedConversation.isChatClosedPostEvent &&
+      !isEventEnded
+  );
+
+  const dismissSafetyNote = () => {
+    setSafetyDismissed(true);
+    try {
+      localStorage.setItem(SAFETY_NOTE_STORAGE_KEY, '1');
+    } catch {
+      // ignore storage failure
+    }
+  };
+
+  const handleSendMessage = (e: React.FormEvent) => {
+    e.preventDefault();
     if (!inputText.trim() || !selectedConversationId) return;
     sendMessage(selectedConversationId, inputText);
     setInputText('');
   };
 
-  const handlePromptClick = (prompt: string) => {
-    if (!selectedConversationId) return;
-    sendMessage(selectedConversationId, prompt);
+  const computeNextSelectedId = (removedIds: string[]) => {
+    if (!selectedConversationId || !removedIds.includes(selectedConversationId)) {
+      return selectedConversationId;
+    }
+    const isDesktop = typeof window !== 'undefined' && window.innerWidth >= 768;
+    if (!isDesktop) return null;
+    const oldIdx = conversations.findIndex((c) => c.id === selectedConversationId);
+    const remaining = conversations.filter((c) => !removedIds.includes(c.id));
+    if (remaining.length === 0) return null;
+    return remaining[Math.min(oldIdx >= 0 ? oldIdx : 0, remaining.length - 1)].id;
   };
 
-  const handleDisconnect = () => {
-    if (!selectedConversationId) return;
-    disconnectConversation(selectedConversationId);
-    setDisconnectConfirmOpen(false);
-    setStatusToast('You disconnected from this conversation.');
-    setTimeout(() => setStatusToast(''), 3500);
+  const handleConfirmLeaveChat = () => {
+    if (!selectedConversation || isConfirming) return;
+    setIsConfirming(true);
+    const nextId = computeNextSelectedId([selectedConversation.id]);
+    removeConversations({
+      partnerId: selectedConversation.partner.id,
+      eventId: selectedConversation.eventId,
+      reason: 'left'
+    });
+    setLeaveConfirmOpen(false);
+    setOpenMenuId(null);
+    setSelectedConversationId(nextId);
+    setIsConfirming(false);
+    showToast('You left the chat.');
+    window.setTimeout(() => {
+      if (nextId) {
+        chatHeaderMenuBtnRef.current?.focus();
+      } else {
+        chatListRef.current?.focus();
+      }
+    }, 0);
   };
 
-  const selectedEvent = viewingEventId
-    ? events.find((e) => e.id === viewingEventId) || null
+  const handleConfirmBlock = () => {
+    if (!blockTarget || isConfirming) return;
+    setIsConfirming(true);
+    const removedIds = conversations
+      .filter((c) => c.partner.id === blockTarget.id)
+      .map((c) => c.id);
+    const nextId = computeNextSelectedId(removedIds);
+    blockUser(blockTarget.id);
+    setBlockTarget(null);
+    setOpenMenuId(null);
+    setSelectedConversationId(nextId);
+    setIsConfirming(false);
+    showToast('Blocked.');
+    window.setTimeout(() => {
+      if (nextId) {
+        chatHeaderMenuBtnRef.current?.focus();
+      } else {
+        chatListRef.current?.focus();
+      }
+    }, 0);
+  };
+
+  const toggleExpandRequest = (id: string) => {
+    setExpandedRequestIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const closedComposerMessage = selectedConversation?.isChatClosedPostEvent
+    ? 'Chat closed.'
+    : isEventEnded
+    ? 'Event ended.'
     : null;
 
   return (
-    <div className="pb-20 md:pb-12 max-w-6xl mx-auto h-[calc(100vh-8.5rem)] md:h-[calc(100vh-6rem)] flex flex-col">
-      {/* Prototype Simulated Notice Banner - Requirement 10 */}
-      <div className="bg-stone-900 text-stone-300 px-4 py-2 text-[11px] flex items-center justify-between border-b border-stone-800 shrink-0">
-        <div className="flex items-center gap-2">
-          <Shield className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-          <span>
-            <strong className="text-amber-300">Prototype Demo:</strong> Requests, mutual acceptances, daily limits ({dailyBuddyRequestsCount}/{maxDailyRequests}), disconnects, and simulated reports run locally.
-          </span>
+    <div className="max-w-5xl mx-auto w-full h-[calc(100vh-9.5rem)] md:h-[calc(100vh-7.5rem)] flex flex-col relative">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 bg-surface text-ink text-xs font-semibold rounded-2xl shadow-lift border border-accent flex items-center gap-2"
+        >
+          <Check className="w-4 h-4 text-accent-text stroke-[2.5] shrink-0" />
+          <span>{toastMessage}</span>
         </div>
-        <span className="text-stone-400 hidden sm:inline">
-          Server-side enforcement required for production
-        </span>
-      </div>
+      )}
 
-      {/* Top Section Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 sm:py-3 sm:px-0 border-b border-stone-200 shrink-0">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl sm:text-2xl font-black text-stone-950 tracking-tight">
-              Event Messages & Buddies
-            </h1>
-            <span className="text-[11px] font-bold text-stone-950 bg-amber-400 px-2.5 py-0.5 rounded-full shadow-2xs">
-              UW Demo
-            </span>
-          </div>
-          <p className="text-xs text-stone-600 mt-0.5">
-            Connections unlock only when a request is mutually accepted. Chatting without accepted requests is prohibited.
-          </p>
-        </div>
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3 pb-4 border-b border-line shrink-0">
+        <h1 className="font-display text-2xl sm:text-3xl font-bold text-ink tracking-tight">
+          Buddy Buzz
+        </h1>
 
-        {/* Sub-tab switcher */}
-        <div className="flex items-center p-1 bg-stone-100 rounded-2xl w-fit self-start sm:self-auto border border-stone-200/60">
+        <div className="flex items-center p-1 bg-surface rounded-2xl border border-line shadow-soft">
           <button
+            type="button"
             onClick={() => setActiveSubTab('conversations')}
-            className={`px-3.5 py-1.5 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 ${
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-xl transition-colors cursor-pointer ${
               activeSubTab === 'conversations'
-                ? 'bg-stone-950 text-amber-300 shadow-xs'
-                : 'text-stone-600 hover:text-stone-950'
+                ? 'bg-accent text-accent-ink'
+                : 'text-muted hover:text-ink'
             }`}
           >
-            <MessageSquare className="w-3.5 h-3.5" />
-            <span>Active Chats ({conversations.length})</span>
+            Chats
           </button>
 
           <button
+            type="button"
             onClick={() => setActiveSubTab('requests')}
-            className={`px-3.5 py-1.5 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 relative ${
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer ${
               activeSubTab === 'requests'
-                ? 'bg-stone-950 text-amber-300 shadow-xs'
-                : 'text-stone-600 hover:text-stone-950'
+                ? 'bg-accent text-accent-ink'
+                : 'text-muted hover:text-ink'
             }`}
           >
-            <Users className="w-3.5 h-3.5" />
             <span>Requests</span>
-            {incomingRequests.filter((r) => r.status === 'pending').length > 0 && (
-              <span className="w-4 h-4 rounded-full bg-amber-400 text-stone-950 text-[10px] font-black flex items-center justify-center">
-                {incomingRequests.filter((r) => r.status === 'pending').length}
+            {pendingIncomingCount > 0 && (
+              <span className="min-w-4 h-4 px-1 rounded-full bg-ink text-canvas text-[10px] font-bold flex items-center justify-center tabular-nums">
+                {pendingIncomingCount}
               </span>
             )}
           </button>
         </div>
       </div>
 
-      {statusToast && (
-        <div className="mx-3 mt-2 p-2.5 bg-stone-950 text-amber-300 text-xs font-bold rounded-xl shadow-md border border-stone-800 flex items-center gap-2 animate-in fade-in">
-          <Check className="w-4 h-4 text-amber-400 stroke-[3]" />
-          <span>{statusToast}</span>
-        </div>
+      {dailyBuddyRequestsCount >= maxDailyRequests && (
+        <p className="text-xs text-muted pt-2.5 shrink-0">Daily limit reached.</p>
       )}
 
-      {/* Main Tab Content */}
+      {/* Main Content */}
       {activeSubTab === 'requests' ? (
-        <div className="flex-1 overflow-y-auto pt-4 space-y-6 px-3 sm:px-0">
-          {/* Incoming Requests (Requirement 3: Accept/Decline without reason) */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-                <span>Incoming Buddy Requests</span>
-                <span className="text-xs font-normal text-stone-700">
-                  ({incomingRequests.filter((r) => r.status === 'pending').length} pending)
-                </span>
-              </h2>
-              <span className="text-[11px] text-stone-600">
-                Accepting unlocks a shared chat
-              </span>
+        <div className="flex-1 overflow-y-auto pt-4 space-y-6 pr-1 filters-scroll">
+          {incomingPendingRequests.length === 0 ? (
+            <div className="py-10 px-6 bg-surface rounded-3xl border border-line shadow-soft flex flex-col items-center text-center gap-2">
+              <Goose size={84} state="looking" />
+              <p className="text-sm font-medium text-ink">No requests right now.</p>
             </div>
+          ) : (
+            <div className="space-y-3">
+              {incomingPendingRequests.map((req) => {
+                const isExpanded = Boolean(expandedRequestIds[req.id]);
+                const hasReasons = Boolean(req.compatibilityReasons && req.compatibilityReasons.length > 0);
+                const isMenuOpen = openMenuId === `req_${req.id}`;
+                const avatarSrc = safeMediaUrl(req.senderAvatar) || '';
 
-            {incomingRequests.length === 0 ? (
-              <div className="p-8 bg-white rounded-2xl border border-stone-200 text-center space-y-1">
-                <Users className="w-8 h-8 text-stone-300 mx-auto" />
-                <p className="text-xs font-semibold text-stone-800">No incoming requests</p>
-                <p className="text-[11px] text-stone-600">
-                  When attendees invite you to go to an event together, their requests will appear here.
-                </p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                {incomingRequests.map((req) => (
+                return (
                   <div
                     key={req.id}
-                    className="p-4 bg-white rounded-2xl border border-amber-300/90 shadow-2xs space-y-3"
+                    className="bg-surface rounded-2xl border border-line shadow-soft p-4 space-y-3"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-start gap-3">
+                      <button
+                        type="button"
+                        onClick={() => hasReasons && toggleExpandRequest(req.id)}
+                        className={`flex items-start gap-3 min-w-0 flex-1 text-left ${
+                          hasReasons ? 'cursor-pointer' : 'cursor-default'
+                        }`}
+                      >
                         <img
-                          src={req.senderAvatar}
+                          src={avatarSrc}
                           alt={req.senderName}
                           referrerPolicy="no-referrer"
-                          className="w-11 h-11 rounded-full object-cover border-2 border-amber-400 shrink-0"
+                          className="w-10 h-10 rounded-full object-cover ring-2 ring-accent shrink-0 bg-surface-soft"
                         />
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <h4 className="font-bold text-stone-900 text-sm truncate">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-sm text-ink truncate">
                               {req.senderName}
-                            </h4>
-                            <span className="text-[10px] bg-stone-950 text-amber-300 font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5">
-                              <Shield className="w-2.5 h-2.5 text-amber-400" />
-                              Verified Student
                             </span>
-                            {req.compatibilityScore && (
-                              <span className="text-[10px] bg-amber-400 text-stone-950 font-black px-2 py-0.5 rounded-full flex items-center gap-1 shadow-2xs">
-                                <Sparkles className="w-2.5 h-2.5" />
-                                {req.compatibilityScore}% Match
+                            {typeof req.compatibilityScore === 'number' && (
+                              <span className="text-[11px] bg-accent-soft text-accent-text font-semibold px-2 py-0.5 rounded-full tabular-nums">
+                                {req.compatibilityScore}% match
                               </span>
                             )}
                           </div>
-                          {(req.senderFaculty || req.senderYear) && (
-                            <p className="text-xs text-stone-600">
-                              {req.senderFaculty} {req.senderYear ? `(${req.senderYear})` : ''}
-                            </p>
-                          )}
+                          <p className="text-xs text-muted truncate mt-0.5 flex items-center gap-1">
+                            <Calendar className="w-3 h-3 shrink-0 text-accent-text" />
+                            <span className="truncate">{req.eventTitle}</span>
+                            {hasReasons && (
+                              isExpanded ? (
+                                <ChevronUp className="w-3.5 h-3.5 shrink-0 ml-1" />
+                              ) : (
+                                <ChevronDown className="w-3.5 h-3.5 shrink-0 ml-1" />
+                              )
+                            )}
+                          </p>
                         </div>
-                      </div>
-
-                      {/* Block/Report button on incoming request */}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setReportTarget({
-                            type: 'user',
-                            attendee: {
-                              id: req.senderId,
-                              name: req.senderName,
-                              avatar: req.senderAvatar,
-                              faculty: req.senderFaculty,
-                              year: req.senderYear,
-                              isVerifiedUWStudent: true
-                            }
-                          });
-                          setReportModalOpen(true);
-                        }}
-                        className="p-1.5 text-stone-400 hover:text-red-700 rounded-lg hover:bg-stone-100"
-                        title="Block or report sender"
-                      >
-                        <Flag className="w-3.5 h-3.5" />
                       </button>
-                    </div>
 
-                    {/* Compatibility reasons if available */}
-                    {req.compatibilityReasons && req.compatibilityReasons.length > 0 && (
-                      <div className="p-2 bg-amber-50 rounded-xl border border-amber-200 text-[10px] text-stone-700 space-y-1">
-                        <span className="font-bold uppercase tracking-wider text-amber-950 block">Mutual Compatibility:</span>
-                        <div className="flex flex-wrap gap-1">
-                          {req.compatibilityReasons.map((r, i) => (
-                            <span key={i} className="px-1.5 py-0.5 bg-white rounded border border-amber-200 text-stone-800">
-                              ✓ {r}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="p-2.5 bg-stone-50 rounded-xl border border-stone-200/70 text-xs space-y-1">
-                      <div className="flex items-center gap-1.5 font-bold text-stone-900 truncate">
-                        <Calendar className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                        <span className="truncate">{req.eventTitle}</span>
-                      </div>
-                      {req.introMessage && (
-                        <p className="text-stone-600 italic text-[11px] pt-1">
-                          &ldquo;{req.introMessage}&rdquo;
-                        </p>
-                      )}
-                    </div>
-
-                    {req.status === 'pending' ? (
-                      <div className="flex items-center justify-end gap-2 pt-1">
+                      <div className="flex items-center gap-1.5 shrink-0" ref={isMenuOpen ? menuContainerRef : undefined}>
                         <button
+                          type="button"
                           onClick={() => respondConnectionRequest(req.id, 'decline')}
-                          className="px-3.5 py-1.5 rounded-xl border border-stone-200 hover:bg-stone-50 text-stone-700 text-xs font-semibold transition-colors"
+                          className="px-3 py-1.5 rounded-xl border border-line hover:bg-surface-soft text-muted hover:text-ink text-xs font-semibold transition-colors cursor-pointer"
                         >
                           Decline
                         </button>
                         <button
+                          type="button"
                           onClick={() => {
                             respondConnectionRequest(req.id, 'accept');
                             setActiveSubTab('conversations');
                           }}
-                          className="px-4 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-stone-950 text-xs font-black flex items-center gap-1.5 transition-all shadow-2xs"
+                          className="px-3.5 py-1.5 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-bold transition-colors shadow-soft cursor-pointer"
                         >
-                          <Check className="w-3.5 h-3.5 stroke-[3]" />
-                          <span>Accept & Connect</span>
+                          Accept
                         </button>
-                      </div>
-                    ) : req.status === 'accepted' ? (
-                      <div className="text-[11px] text-amber-900 font-bold bg-amber-100 px-3 py-1 rounded-xl text-center">
-                        Request Accepted · Conversation Unlocked
-                      </div>
-                    ) : req.status === 'declined' ? (
-                      <div className="text-[11px] text-stone-500 bg-stone-100 px-3 py-1 rounded-xl text-center">
-                        Request Declined (Re-requesting disabled)
-                      </div>
-                    ) : (
-                      <div className="text-[11px] text-stone-400 bg-stone-100 px-3 py-1 rounded-xl text-center">
-                        Request {req.status}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
 
-          {/* Outgoing Requests Sent by Me */}
-          <div className="space-y-3 pt-3 border-t border-stone-200">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-                <span>Invitations You Sent</span>
-                <span className="text-xs font-normal text-stone-700">
-                  ({outgoingRequests.length})
-                </span>
-              </h2>
-              <span className="text-[11px] text-stone-500">
-                Daily limit: {dailyBuddyRequestsCount}/{maxDailyRequests}
-              </span>
-            </div>
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              lastTriggerRef.current = e.currentTarget;
+                              setOpenMenuId(isMenuOpen ? null : `req_${req.id}`);
+                            }}
+                            className="p-1.5 text-muted hover:text-ink rounded-xl hover:bg-surface-soft transition-colors cursor-pointer"
+                            aria-label="More actions"
+                          >
+                            <MoreHorizontal className="w-4 h-4" />
+                          </button>
 
-            {outgoingRequests.length === 0 ? (
-              <div className="p-6 bg-white rounded-2xl border border-stone-200 text-center text-xs text-stone-600">
-                You haven&apos;t sent any buddy requests yet. Open an event in the Feed to find a buddy!
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {outgoingRequests.map((req) => (
-                  <div
-                    key={req.id}
-                    className="p-3 bg-white rounded-xl border border-stone-200 flex items-center justify-between text-xs"
-                  >
-                    <div className="min-w-0 pr-2">
-                      <p className="font-semibold text-stone-900 truncate">
-                        To {req.recipientName} for {req.eventTitle}
-                      </p>
-                      <p className="text-[11px] text-stone-600 truncate">
-                        Status:{' '}
-                        <span
-                          className={`font-semibold capitalize ${
-                            req.status === 'accepted'
-                              ? 'text-amber-700'
-                              : req.status === 'declined'
-                              ? 'text-red-700'
-                              : req.status === 'expired'
-                              ? 'text-stone-400'
-                              : 'text-stone-700'
-                          }`}
-                        >
-                          {req.status === 'expired' ? 'Expired (Event Ended)' : req.status}
-                        </span>
-                      </p>
+                          {isMenuOpen && (
+                            <div className="absolute right-0 mt-1 w-36 bg-surface border border-line rounded-xl shadow-lift py-1 z-20 text-xs">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setOpenMenuId(null);
+                                  setBlockTarget({ id: req.senderId, name: req.senderName });
+                                }}
+                                className="w-full text-left px-3 py-2 text-ink hover:bg-surface-soft cursor-pointer"
+                              >
+                                Block
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setReportTarget({
+                                    type: 'user',
+                                    attendee: {
+                                      id: req.senderId,
+                                      name: req.senderName,
+                                      avatar: req.senderAvatar,
+                                      faculty: req.senderFaculty,
+                                      year: req.senderYear,
+                                      isVerifiedUWStudent: true
+                                    }
+                                  });
+                                  setReportModalOpen(true);
+                                  setOpenMenuId(null);
+                                }}
+                                className="w-full text-left px-3 py-2 text-danger hover:bg-danger-soft cursor-pointer"
+                              >
+                                Report
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </div>
 
-                    {req.status === 'pending' && (
-                      <button
-                        onClick={() => withdrawConnectionRequest(req.id)}
-                        className="text-[11px] text-red-700 hover:text-red-900 font-semibold px-2 py-1 hover:bg-red-50 rounded-lg shrink-0"
-                      >
-                        Withdraw
-                      </button>
+                    {isExpanded && hasReasons && (
+                      <div className="pt-2 border-t border-line flex flex-wrap gap-1.5 text-xs">
+                        {req.compatibilityReasons!.map((reason, idx) => (
+                          <span
+                            key={idx}
+                            className="px-2.5 py-1 rounded-lg bg-surface-soft text-ink border border-line"
+                          >
+                            {reason}
+                          </span>
+                        ))}
+                      </div>
                     )}
                   </div>
-                ))}
+                );
+              })}
+            </div>
+          )}
+
+          {/* Compact Sent list */}
+          {outgoingRequests.length > 0 && (
+            <div className="space-y-2 pt-2 border-t border-line">
+              <h2 className="text-xs font-semibold text-muted">Sent</h2>
+              <div className="space-y-2">
+                {outgoingRequests.map((req) => {
+                  const recipientAvatar = safeMediaUrl(allAttendees[req.recipientId]?.avatar) || '';
+                  const statusLabel =
+                    req.status === 'expired'
+                      ? 'Expired'
+                      : req.status.charAt(0).toUpperCase() + req.status.slice(1);
+
+                  return (
+                    <div
+                      key={req.id}
+                      className="px-3.5 py-2.5 bg-surface rounded-2xl border border-line flex items-center justify-between gap-3 text-xs"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {recipientAvatar ? (
+                          <img
+                            src={recipientAvatar}
+                            alt={req.recipientName}
+                            referrerPolicy="no-referrer"
+                            className="w-8 h-8 rounded-full object-cover shrink-0 bg-surface-soft"
+                          />
+                        ) : (
+                          <div className="w-8 h-8 rounded-full bg-surface-soft text-ink font-semibold flex items-center justify-center shrink-0">
+                            {req.recipientName.charAt(0)}
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <p className="font-semibold text-ink truncate">{req.recipientName}</p>
+                          <p className="text-muted truncate">{req.eventTitle}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2.5 shrink-0">
+                        <span
+                          className={`font-medium ${
+                            req.status === 'accepted'
+                              ? 'text-accent-text'
+                              : req.status === 'declined'
+                              ? 'text-danger'
+                              : 'text-muted'
+                          }`}
+                        >
+                          {statusLabel}
+                        </span>
+                        {req.status === 'pending' && (
+                          <button
+                            type="button"
+                            onClick={() => withdrawConnectionRequest(req.id)}
+                            className="px-2.5 py-1 rounded-lg border border-line text-muted hover:text-danger hover:border-danger/40 font-semibold transition-colors cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       ) : (
-        /* Active Conversations View */
-        <div className="flex-1 flex overflow-hidden pt-3 gap-4 px-3 sm:px-0">
-          {/* Left: Conversations list */}
+        /* Chats Tab */
+        <div className="flex-1 flex overflow-hidden pt-4 gap-4">
+          {/* Conversation list */}
           <div
-            className={`w-full md:w-80 lg:w-96 flex flex-col shrink-0 bg-white rounded-2xl border border-stone-200 overflow-hidden ${
+            ref={chatListRef}
+            tabIndex={-1}
+            className={`w-full md:w-80 lg:w-96 flex flex-col shrink-0 bg-surface rounded-3xl border border-line shadow-soft overflow-hidden focus:outline-none ${
               selectedConversationId ? 'hidden md:flex' : 'flex'
             }`}
           >
-            <div className="p-3 border-b border-stone-100 bg-stone-50 text-xs font-bold text-stone-700 flex items-center justify-between">
-              <span>Active Buddy Chats</span>
-              <span className="text-[10px] text-stone-500 font-normal">Accepted requests only</span>
-            </div>
-
-            <div className="flex-1 overflow-y-auto divide-y divide-stone-100">
+            <div className="flex-1 overflow-y-auto divide-y divide-line filters-scroll">
               {conversations.length === 0 ? (
-                <div className="p-8 text-center text-xs text-stone-600 space-y-1">
-                  <p className="font-medium text-stone-800">No active conversations</p>
-                  <p className="text-[11px]">
-                    Accept incoming requests or send a buddy invite on an event to start coordinating!
+                <div className="h-full flex flex-col items-center justify-center p-8 text-center gap-2">
+                  <Goose size={84} state="looking" />
+                  <p className="text-sm font-medium text-ink">
+                    No buddies yet. Find an event and make a friend.
                   </p>
                 </div>
               ) : (
                 conversations.map((conv) => {
                   const isSelected = conv.id === selectedConversationId;
+                  const avatarSrc = safeMediaUrl(conv.partner.avatar) || '';
+
                   return (
-                    <div
+                    <button
+                      type="button"
                       key={conv.id}
-                      onClick={() => setSelectedConversationId(conv.id)}
-                      className={`p-3.5 hover:bg-stone-50 transition-colors cursor-pointer flex items-start gap-3 ${
-                        isSelected ? 'bg-amber-500/10 border-l-4 border-l-amber-500' : ''
+                      onClick={() => {
+                        setSelectedConversationId(conv.id);
+                        setOpenMenuId(null);
+                      }}
+                      className={`w-full text-left px-4 py-3.5 hover:bg-surface-soft/50 transition-colors cursor-pointer flex items-center gap-3 border-l-4 ${
+                        isSelected
+                          ? 'bg-accent-soft/60 border-l-accent'
+                          : 'border-l-transparent'
                       }`}
                     >
                       <img
-                        src={conv.partner.avatar}
+                        src={avatarSrc}
                         alt={conv.partner.name}
                         referrerPolicy="no-referrer"
-                        className="w-10 h-10 rounded-full object-cover border-2 border-amber-400 shrink-0"
+                        className="w-10 h-10 rounded-full object-cover ring-2 ring-accent/70 shrink-0 bg-surface-soft"
                       />
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-bold text-xs text-stone-900 truncate">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-sm text-ink truncate">
                             {conv.partner.name}
-                          </h4>
-                          <span className="text-[10px] text-stone-600">{conv.lastMessageTime}</span>
+                          </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="text-[11px] text-muted">{conv.lastMessageTime}</span>
+                            {conv.unreadCount > 0 && (
+                              <span
+                                className="w-2 h-2 rounded-full bg-accent shrink-0"
+                                aria-label="Unread message"
+                              />
+                            )}
+                          </div>
                         </div>
-                        <p className="text-[11px] font-bold text-amber-800 truncate">
-                          {conv.eventTitle}
-                        </p>
-                        <p className="text-[11px] text-stone-600 truncate mt-0.5">
-                          {conv.isDisconnected
-                            ? 'Disconnected'
-                            : conv.isBlocked
-                            ? 'User Blocked'
-                            : conv.lastMessage}
-                        </p>
+                        <p className="text-xs text-muted truncate mt-0.5">{conv.lastMessage}</p>
                       </div>
-                    </div>
+                    </button>
                   );
                 })
               )}
             </div>
           </div>
 
-          {/* Right: Active Chat Area */}
+          {/* Active Chat Panel */}
           <div
-            className={`flex-1 flex flex-col bg-white rounded-2xl border border-stone-200 overflow-hidden ${
+            className={`flex-1 flex flex-col bg-surface rounded-3xl border border-line shadow-soft overflow-hidden ${
               !selectedConversationId ? 'hidden md:flex' : 'flex'
             }`}
           >
             {selectedConversation ? (
               <>
-                {/* Chat Top Header with Event Banner & Safety Controls */}
-                <div className="p-3.5 border-b border-stone-200 bg-stone-50/90 flex flex-col gap-2 shrink-0">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 min-w-0">
-                      {/* Mobile Back Button to list */}
-                      <button
-                        onClick={() => setSelectedConversationId(null)}
-                        className="md:hidden p-1.5 text-stone-500 hover:text-stone-800"
-                        aria-label="Back to conversations"
-                      >
-                        <ArrowLeft className="w-4 h-4" />
-                      </button>
+                {/* Chat Header */}
+                <div className="px-4 py-3 border-b border-line bg-surface-soft/30 flex items-center justify-between gap-2 shrink-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedConversationId(null);
+                        setOpenMenuId(null);
+                      }}
+                      className="md:hidden p-1.5 text-muted hover:text-ink rounded-xl hover:bg-surface-soft cursor-pointer"
+                      aria-label="Back to chats"
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
 
-                      <img
-                        src={selectedConversation.partner.avatar}
-                        alt={selectedConversation.partner.name}
-                        referrerPolicy="no-referrer"
-                        className="w-9 h-9 rounded-full object-cover border-2 border-amber-400 shrink-0"
-                      />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <h3 className="font-bold text-xs sm:text-sm text-stone-900 truncate">
-                            {selectedConversation.partner.name}
-                          </h3>
-                          <span className="text-[10px] bg-stone-100 text-stone-700 px-1 py-0.2 rounded">
-                            Demo verified
-                          </span>
-                        </div>
-                        {(selectedConversation.partner.faculty || selectedConversation.partner.year) && (
-                          <p className="text-[11px] text-stone-600 truncate">
-                            {selectedConversation.partner.faculty} {selectedConversation.partner.year ? `(${selectedConversation.partner.year})` : ''}
-                          </p>
-                        )}
-                      </div>
-                    </div>
+                    <img
+                      src={safeMediaUrl(selectedConversation.partner.avatar) || ''}
+                      alt={selectedConversation.partner.name}
+                      referrerPolicy="no-referrer"
+                      className="w-9 h-9 rounded-full object-cover ring-2 ring-accent shrink-0 bg-surface-soft"
+                    />
 
-                    {/* Disconnect, Block & Report Controls - Requirement 4 */}
-                    <div className="flex items-center gap-1.5">
-                      {!selectedConversation.isDisconnected && (
+                    <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                      <h3 className="font-semibold text-sm text-ink truncate">
+                        {selectedConversation.partner.name}
+                      </h3>
+
+                      {linkedUpcomingEvent ? (
                         <button
                           type="button"
-                          onClick={() => setDisconnectConfirmOpen(true)}
-                          className="px-2.5 py-1 text-stone-600 hover:text-red-700 hover:bg-red-50 rounded-lg text-xs font-semibold flex items-center gap-1 border border-stone-200 transition-colors"
-                          title="Leave conversation / Disconnect without requiring approval"
+                          onClick={() => setViewingEventId(linkedUpcomingEvent.id)}
+                          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-accent-soft text-accent-text text-xs font-medium hover:bg-accent hover:text-accent-ink transition-colors max-w-[200px] truncate cursor-pointer"
                         >
-                          <UserX className="w-3.5 h-3.5" />
-                          <span className="hidden sm:inline">Disconnect</span>
+                          <Calendar className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{selectedConversation.eventTitle}</span>
                         </button>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-surface-soft text-muted text-xs font-medium max-w-[220px] truncate">
+                          <span className="truncate">{selectedConversation.eventTitle}</span>
+                          <span>· Ended</span>
+                        </span>
                       )}
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setReportTarget({
-                            type: 'user',
-                            attendee: selectedConversation.partner
-                          });
-                          setReportModalOpen(true);
-                        }}
-                        className="p-1.5 text-stone-400 hover:text-red-700 hover:bg-stone-100 rounded-lg text-xs flex items-center gap-1 transition-colors"
-                        title="Block or report attendee"
-                      >
-                        <Flag className="w-3.5 h-3.5" />
-                        <span className="hidden sm:inline">Report</span>
-                      </button>
                     </div>
                   </div>
 
-                  {/* Linked Event Quick Banner */}
-                  <div className="flex items-center justify-between p-2 rounded-xl bg-amber-50 border border-amber-200/90 text-xs">
-                    <div className="flex items-center gap-2 truncate pr-2">
-                      <Calendar className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                      <span className="font-bold text-stone-950 truncate">
-                        Attending together: {selectedConversation.eventTitle}
-                      </span>
-                    </div>
-
+                  {/* "..." Menu */}
+                  <div
+                    className="relative shrink-0"
+                    ref={openMenuId === 'chat_header' ? menuContainerRef : undefined}
+                  >
                     <button
-                      onClick={() => setViewingEventId(selectedConversation.eventId)}
-                      className="text-[11px] font-bold text-stone-950 hover:text-amber-800 underline shrink-0 flex items-center gap-1"
+                      ref={chatHeaderMenuBtnRef}
+                      type="button"
+                      onClick={(e) => {
+                        lastTriggerRef.current = e.currentTarget;
+                        setOpenMenuId(openMenuId === 'chat_header' ? null : 'chat_header');
+                      }}
+                      className="p-2 text-muted hover:text-ink hover:bg-surface-soft rounded-xl transition-colors cursor-pointer"
+                      aria-label="Chat options"
                     >
-                      <span>View Event</span>
-                      <ExternalLink className="w-3 h-3" />
+                      <MoreHorizontal className="w-4 h-4" />
+                    </button>
+
+                    {openMenuId === 'chat_header' && (
+                      <div className="absolute right-0 mt-1 w-36 bg-surface border border-line rounded-xl shadow-lift py-1 z-20 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            lastTriggerRef.current = chatHeaderMenuBtnRef.current;
+                            setOpenMenuId(null);
+                            setLeaveConfirmOpen(true);
+                          }}
+                          className="w-full text-left px-3 py-2 text-ink hover:bg-surface-soft cursor-pointer"
+                        >
+                          Leave chat
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            lastTriggerRef.current = chatHeaderMenuBtnRef.current;
+                            setOpenMenuId(null);
+                            setBlockTarget({
+                              id: selectedConversation.partner.id,
+                              name: selectedConversation.partner.name
+                            });
+                          }}
+                          className="w-full text-left px-3 py-2 text-ink hover:bg-surface-soft cursor-pointer"
+                        >
+                          Block
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setReportTarget({
+                              type: 'user',
+                              attendee: selectedConversation.partner
+                            });
+                            setReportModalOpen(true);
+                            setOpenMenuId(null);
+                          }}
+                          className="w-full text-left px-3 py-2 text-danger hover:bg-danger-soft cursor-pointer"
+                        >
+                          Report
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* One-time dismissible safety note on brand-new chat */}
+                {isBrandNewChat && !safetyDismissed && (
+                  <div className="px-4 py-1.5 bg-canvas border-b border-line text-xs text-muted flex items-center justify-between gap-2 shrink-0">
+                    <span>Meet in public. Leave or block anytime.</span>
+                    <button
+                      type="button"
+                      onClick={dismissSafetyNote}
+                      className="p-1 text-muted hover:text-ink rounded-lg cursor-pointer"
+                      aria-label="Dismiss note"
+                    >
+                      <X className="w-3.5 h-3.5" />
                     </button>
                   </div>
-                </div>
-
-                {/* Requirement 6: Safety reminder in chat header */}
-                <div className="px-3 py-1.5 bg-amber-50/50 border-b border-amber-100 text-[11px] text-stone-600 flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <Shield className="w-3 h-3 text-amber-600 shrink-0" />
-                    <span>&ldquo;You choose what to share. You can leave or block a conversation at any time.&rdquo;</span>
-                  </div>
-                  <span className="text-[10px] text-stone-400 hidden sm:inline">GPS location is never shared</span>
-                </div>
-
-                {/* Status Banners: Blocked / Disconnected / Event Ended */}
-                {selectedConversation.isBlocked && (
-                  <div className="p-3 bg-red-50 text-red-800 text-xs flex items-center gap-2 border-b border-red-100">
-                    <Ban className="w-4 h-4 shrink-0 text-red-600" />
-                    <span>This user has been blocked. Messages and invites are permanently disabled.</span>
-                  </div>
                 )}
 
-                {selectedConversation.isDisconnected && (
-                  <div className="p-3 bg-stone-100 text-stone-700 text-xs flex items-center gap-2 border-b border-stone-200">
-                    <UserX className="w-4 h-4 shrink-0 text-stone-500" />
-                    <span>You have disconnected from this buddy. Messages are closed.</span>
-                  </div>
-                )}
-
-                {/* Requirement 9: Post-Event State & Mutual "Stay Connected" */}
-                {isEventEnded && !selectedConversation.isBlocked && !selectedConversation.isDisconnected && (
-                  <div className="p-3 bg-stone-100 border-b border-stone-200 text-xs space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 font-bold text-stone-900">
-                        <Clock className="w-3.5 h-3.5 text-amber-700" />
-                        <span>Event Concluded — Post-Event Connection</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => toggleChatPostEventClosed(selectedConversation.id)}
-                          className="text-[10px] text-stone-500 underline hover:text-stone-800"
-                          title="Simulate 48 hours passed without mutual agreement"
-                        >
-                          {selectedConversation.isChatClosedPostEvent ? 'Reopen Window' : 'Simulate 48h Window Passed'}
-                        </button>
-                      </div>
-                    </div>
-
-                    <p className="text-[11px] text-stone-600">
-                      Buddies must mutually choose &ldquo;Stay connected&rdquo; to keep messaging. If both have not agreed within 48 hours, new messages will close.
-                    </p>
-
-                    <div className="flex items-center justify-between p-2 bg-white rounded-xl border border-stone-200 flex-wrap gap-2">
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleStayConnected(selectedConversation.id)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors ${
-                            selectedConversation.stayConnectedUser
-                              ? 'bg-amber-400 text-stone-950'
-                              : 'bg-stone-100 hover:bg-stone-200 text-stone-700'
-                          }`}
-                        >
-                          <Heart className={`w-3.5 h-3.5 ${selectedConversation.stayConnectedUser ? 'fill-stone-950' : ''}`} />
-                          <span>{selectedConversation.stayConnectedUser ? 'You chose Stay Connected' : 'Stay Connected'}</span>
-                        </button>
-
-                        {/* Interactive toggle for partner's response in this prototype */}
-                        <button
-                          type="button"
-                          onClick={() => simulatePartnerStayConnected(selectedConversation.id)}
-                          className="text-[10px] text-stone-500 underline hover:text-stone-800"
-                        >
-                          (Partner: {selectedConversation.stayConnectedPartner ? 'Agreed ✓' : 'Not yet'})
-                        </button>
-                      </div>
-
-                      <span className="text-[11px] font-semibold">
-                        {selectedConversation.stayConnectedUser && selectedConversation.stayConnectedPartner ? (
-                          <span className="text-emerald-700 font-bold">✓ Mutual Agreement (Chat open)</span>
-                        ) : selectedConversation.isChatClosedPostEvent ? (
-                          <span className="text-red-700 font-bold">Chat Closed (48h Expired)</span>
-                        ) : (
-                          <span className="text-amber-800">Awaiting mutual consent</span>
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Message Scroll Area */}
-                <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                  <div className="text-center py-2">
-                    <span className="text-[10px] text-stone-600 bg-stone-100 px-3 py-1 rounded-full">
-                      Connected for {selectedConversation.eventTitle}
-                    </span>
-                  </div>
-
+                {/* Messages */}
+                <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3 filters-scroll">
                   {currentMessages.map((msg) => {
                     const isMe = msg.senderId === user?.id;
                     const isSystem = msg.senderId === 'system';
@@ -652,7 +751,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ onViewEvent }) => {
                     if (isSystem) {
                       return (
                         <div key={msg.id} className="text-center py-1">
-                          <span className="text-[11px] text-stone-500 bg-stone-100 px-3 py-1 rounded-lg italic">
+                          <span className="text-xs text-muted bg-surface-soft px-3 py-1 rounded-xl">
                             {msg.text}
                           </span>
                         </div>
@@ -667,13 +766,13 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ onViewEvent }) => {
                         <div
                           className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-xs sm:text-sm leading-relaxed ${
                             isMe
-                              ? 'bg-stone-950 text-amber-200 rounded-br-xs border border-stone-800 shadow-2xs font-medium'
-                              : 'bg-stone-100 text-stone-900 rounded-bl-xs'
+                              ? 'bg-accent text-accent-ink rounded-br-sm font-medium shadow-soft'
+                              : 'bg-surface-soft text-ink rounded-bl-sm'
                           }`}
                         >
                           <p>{msg.text}</p>
                         </div>
-                        <span className="text-[10px] text-stone-600 mt-1 px-1">
+                        <span className="text-[11px] text-muted mt-1 px-1">
                           {msg.timestamp}
                         </span>
                       </div>
@@ -681,102 +780,130 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ onViewEvent }) => {
                   })}
                 </div>
 
-                {/* Helpful Public Meeting Starters - Requirement 6 */}
-                {!selectedConversation.isBlocked &&
-                  !selectedConversation.isDisconnected &&
-                  !selectedConversation.isChatClosedPostEvent && (
-                    <div className="px-4 py-2 bg-stone-50 border-t border-stone-100 flex items-center gap-1.5 overflow-x-auto scrollbar-none">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                      <span className="text-[10px] font-bold text-stone-700 shrink-0">
-                        Public spot starters:
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handlePromptClick("Want to meet at the registration desk?")}
-                        className="text-[11px] px-2.5 py-1 rounded-lg bg-white border border-stone-200 text-stone-700 hover:border-amber-400 hover:text-stone-950 shrink-0 transition-colors"
-                      >
-                        &ldquo;Want to meet at the registration desk?&rdquo;
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handlePromptClick("Is this your first time attending?")}
-                        className="text-[11px] px-2.5 py-1 rounded-lg bg-white border border-stone-200 text-stone-700 hover:border-amber-400 hover:text-stone-950 shrink-0 transition-colors"
-                      >
-                        &ldquo;Is this your first time attending?&rdquo;
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handlePromptClick("Let's meet by the main doors 10 mins before.")}
-                        className="text-[11px] px-2.5 py-1 rounded-lg bg-white border border-stone-200 text-stone-700 hover:border-amber-400 hover:text-stone-950 shrink-0 transition-colors"
-                      >
-                        &ldquo;Let&apos;s meet by the main doors 10 mins before.&rdquo;
-                      </button>
-                    </div>
-                  )}
-
-                {/* Text Input Area */}
-                {!selectedConversation.isBlocked &&
-                !selectedConversation.isDisconnected &&
-                !selectedConversation.isChatClosedPostEvent ? (
+                {/* Composer or single-line closed state */}
+                {closedComposerMessage ? (
+                  <div className="p-3.5 bg-surface-soft/40 border-t border-line text-xs text-muted text-center shrink-0">
+                    {closedComposerMessage}
+                  </div>
+                ) : (
                   <form
                     onSubmit={handleSendMessage}
-                    className="p-3 border-t border-stone-200 bg-white flex items-center gap-2"
+                    className="p-3 border-t border-line bg-surface flex items-center gap-2 shrink-0"
                   >
                     <input
                       type="text"
                       value={inputText}
                       onChange={(e) => setInputText(e.target.value)}
-                      placeholder="Message your event buddy..."
-                      className="flex-1 px-4 py-2.5 rounded-xl border border-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500 text-xs sm:text-sm text-stone-900"
+                      placeholder="Write a message..."
+                      className="flex-1 px-4 py-2.5 rounded-2xl border border-line bg-canvas text-ink placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent text-xs sm:text-sm"
                     />
                     <button
                       type="submit"
                       disabled={!inputText.trim()}
-                      className="px-4 py-2.5 bg-stone-950 hover:bg-black disabled:opacity-40 text-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs border border-stone-800"
+                      className="px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-40 text-accent-ink rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-soft cursor-pointer"
                     >
-                      <Send className="w-3.5 h-3.5 text-amber-400" />
+                      <Send className="w-3.5 h-3.5" />
                       <span className="hidden sm:inline">Send</span>
                     </button>
                   </form>
-                ) : (
-                  <div className="p-3.5 bg-stone-50 border-t border-stone-200 text-xs text-stone-500 text-center">
-                    Messaging is closed for this conversation. Message history remains accessible with block and report controls.
-                  </div>
                 )}
               </>
             ) : (
-              <div className="flex-1 flex items-center justify-center p-8 text-center text-xs text-stone-600">
-                Select a conversation or open an event in the feed to connect with other attendees.
+              <div className="flex-1 flex flex-col items-center justify-center p-8 text-center gap-2">
+                <Goose size={92} state="looking" />
+                <p className="text-sm font-medium text-ink">
+                  No buddies yet. Find an event and make a friend.
+                </p>
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* Disconnect Confirmation Modal */}
-      {disconnectConfirmOpen && selectedConversation && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-stone-100 space-y-4">
-            <h3 className="font-bold text-stone-950 text-base">
-              Disconnect from {selectedConversation.partner.name}?
+      {/* Leave Chat Confirmation Dialog */}
+      {leaveConfirmOpen && selectedConversation && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="leave-chat-dialog-title"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setLeaveConfirmOpen(false);
+              window.setTimeout(() => lastTriggerRef.current?.focus(), 0);
+            }
+          }}
+        >
+          <div className="bg-surface text-ink rounded-3xl max-w-sm w-full p-6 shadow-lift border border-line space-y-4">
+            <h3 id="leave-chat-dialog-title" className="font-display font-bold text-ink text-lg">
+              Leave this chat?
             </h3>
-            <p className="text-xs text-stone-600 leading-relaxed">
-              You do not need the other person&apos;s approval to disconnect. This will immediately close the chat and remove your mutual connection for this event.
+            <p className="text-xs text-muted">
+              It will be removed from your list.
             </p>
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setDisconnectConfirmOpen(false)}
-                className="px-3.5 py-2 text-xs font-semibold text-stone-600"
+                onClick={() => {
+                  setLeaveConfirmOpen(false);
+                  window.setTimeout(() => lastTriggerRef.current?.focus(), 0);
+                }}
+                className="px-4 py-2 text-xs font-semibold text-muted hover:text-ink rounded-xl cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={handleDisconnect}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl text-xs shadow-xs"
+                disabled={isConfirming}
+                onClick={handleConfirmLeaveChat}
+                className="px-4 py-2 bg-danger text-white font-bold rounded-xl text-xs shadow-soft cursor-pointer hover:opacity-90 disabled:opacity-50"
               >
-                Confirm Disconnect
+                Leave
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Block User Confirmation Dialog */}
+      {blockTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="block-user-dialog-title"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setBlockTarget(null);
+              window.setTimeout(() => lastTriggerRef.current?.focus(), 0);
+            }
+          }}
+        >
+          <div className="bg-surface text-ink rounded-3xl max-w-sm w-full p-6 shadow-lift border border-line space-y-4">
+            <h3 id="block-user-dialog-title" className="font-display font-bold text-ink text-lg">
+              Block {getFirstName(blockTarget.name)}?
+            </h3>
+            <p className="text-xs text-muted">
+              Their chats will be removed.
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setBlockTarget(null);
+                  window.setTimeout(() => lastTriggerRef.current?.focus(), 0);
+                }}
+                className="px-4 py-2 text-xs font-semibold text-muted hover:text-ink rounded-xl cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isConfirming}
+                onClick={handleConfirmBlock}
+                className="px-4 py-2 bg-danger text-white font-bold rounded-xl text-xs shadow-soft cursor-pointer hover:opacity-90 disabled:opacity-50"
+              >
+                Block
               </button>
             </div>
           </div>
@@ -793,19 +920,19 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ onViewEvent }) => {
             setReportModalOpen(false);
             setReportTarget(null);
           }}
-          onSuccess={() => {
+          onSuccess={(action) => {
+            showToast(action === 'block' ? 'Blocked.' : 'Reported. Chat removed.');
             setReportModalOpen(false);
-            setStatusToast('Action processed locally.');
-            setTimeout(() => setStatusToast(''), 3000);
+            setReportTarget(null);
           }}
         />
       )}
 
-      {/* Event Details Viewer Modal */}
-      {selectedEvent && (
+      {/* Active Event Detail Modal */}
+      {viewingEvent && (
         <EventDetailModal
-          isOpen={Boolean(selectedEvent)}
-          event={selectedEvent}
+          isOpen={Boolean(viewingEvent)}
+          event={viewingEvent}
           onClose={() => setViewingEventId(null)}
         />
       )}

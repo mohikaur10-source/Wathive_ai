@@ -5,23 +5,20 @@ import {
   X,
   Calendar,
   ChevronDown,
-  List,
-  MapPin,
-  Database,
-  ShieldCheck,
-  User as UserIcon,
-  ArrowRight,
-  LogIn
+  ChevronLeft,
+  ChevronRight,
+  RotateCcw
 } from 'lucide-react';
+import { useReducedMotion } from 'motion/react';
 import { EventItem } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { EventCard } from './EventCard';
 import { EventDetailModal } from './EventDetailModal';
-import { CampusEventMap } from './CampusEventMap';
+import { Goose } from '../common/Goose';
 import { EVENT_CATEGORIES, UW_FACULTIES } from '../../data/mockData';
+import { getTorontoNow } from '../../utils/timeZone';
 import {
   DateRangePreset,
-  getWaterlooTodayStr,
   resolveDateRange,
   eventOverlapsDateRange
 } from '../../utils/dateRange';
@@ -29,18 +26,27 @@ import {
 interface FeedTabProps {
   onNavigateToMessages?: () => void;
   onOpenPreferences?: () => void;
-  onOpenWusaCollector?: () => void;
   onOpenProfile?: () => void;
   onOpenAuth?: () => void;
 }
 
 type LocationBucket = 'all' | 'slc' | 'eng' | 'mc_dc' | 'pac_cif' | 'online' | 'off_campus';
+type SectionKey = 'category' | 'faculty' | 'location' | 'price';
+
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_DEFAULT_WIDTH = 280;
+const COLLAPSED_RAIL_WIDTH = 48;
+
+const STORAGE_OPEN_KEY = 'wathive_filters_open';
+const STORAGE_WIDTH_KEY = 'wathive_filters_width';
+const STORAGE_ACCORDION_KEY = 'wathive_filters_collapsed';
 
 const LOCATION_BUCKETS: { id: LocationBucket; label: string }[] = [
   { id: 'all', label: 'All Locations' },
   { id: 'slc', label: 'Student Life Centre (SLC)' },
   { id: 'eng', label: 'Engineering (E5 / E7)' },
-  { id: 'mc_dc', label: 'Math & Davis Centre (MC / DC)' },
+  { id: 'mc_dc', label: 'Math & Davis (MC / DC)' },
   { id: 'pac_cif', label: 'Athletics (PAC / CIF)' },
   { id: 'online', label: 'Online / Virtual' },
   { id: 'off_campus', label: 'Off-Campus & Uptown' }
@@ -49,11 +55,27 @@ const LOCATION_BUCKETS: { id: LocationBucket; label: string }[] = [
 function matchesLocationBucket(ev: EventItem, bucket: LocationBucket): boolean {
   if (bucket === 'all') return true;
   const loc = (ev.location + ' ' + (ev.venueName || '')).toLowerCase();
-  if (bucket === 'online') return ev.isOnline || loc.includes('online') || loc.includes('virtual') || loc.includes('zoom');
-  if (bucket === 'slc') return loc.includes('slc') || loc.includes('student life') || loc.includes('great hall') || loc.includes('black and gold') || loc.includes('multi-purpose');
-  if (bucket === 'eng') return loc.includes('e7') || loc.includes('e5') || loc.includes('e2') || loc.includes('engineering') || loc.includes('cph');
-  if (bucket === 'mc_dc') return loc.includes('mc ') || loc.includes('mc,') || loc.includes('math') || loc.includes('davis') || loc.includes('dc ');
-  if (bucket === 'pac_cif') return loc.includes('pac') || loc.includes('cif') || loc.includes('icefield') || loc.includes('physical activities') || loc.includes('gym');
+  if (bucket === 'online') {
+    return ev.isOnline || loc.includes('online') || loc.includes('virtual') || loc.includes('zoom');
+  }
+  if (bucket === 'slc') {
+    return (
+      loc.includes('slc') ||
+      loc.includes('student life') ||
+      loc.includes('great hall') ||
+      loc.includes('black and gold') ||
+      loc.includes('multi-purpose')
+    );
+  }
+  if (bucket === 'eng') {
+    return loc.includes('e7') || loc.includes('e5') || loc.includes('e2') || loc.includes('engineering') || loc.includes('cph');
+  }
+  if (bucket === 'mc_dc') {
+    return loc.includes('mc ') || loc.includes('mc,') || loc.includes('math') || loc.includes('davis') || loc.includes('dc ');
+  }
+  if (bucket === 'pac_cif') {
+    return loc.includes('pac') || loc.includes('cif') || loc.includes('icefield') || loc.includes('physical activities') || loc.includes('gym');
+  }
   if (bucket === 'off_campus') {
     return (
       !ev.isOnline &&
@@ -66,17 +88,52 @@ function matchesLocationBucket(ev: EventItem, bucket: LocationBucket): boolean {
   return true;
 }
 
-export const FeedTab: React.FC<FeedTabProps> = ({
-  onNavigateToMessages,
-  onOpenPreferences,
-  onOpenWusaCollector,
-  onOpenProfile,
-  onOpenAuth
-}) => {
-  const { events, rankForYouEvents, user, attendingEventIds, savedEventIds } = useApp();
+function readStoredBool(key: string, fallback: boolean): boolean {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === '0' || raw === 'false') return false;
+    if (raw === '1' || raw === 'true') return true;
+  } catch {
+    // ignore storage errors
+  }
+  return fallback;
+}
 
-  const [feedMode, setFeedMode] = useState<'forYou' | 'all'>('forYou');
-  const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
+function readStoredWidth(): number {
+  try {
+    const raw = localStorage.getItem(STORAGE_WIDTH_KEY);
+    if (raw !== null) {
+      const parsed = parseInt(raw, 10);
+      if (Number.isFinite(parsed)) {
+        return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, parsed));
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return SIDEBAR_DEFAULT_WIDTH;
+}
+
+function readStoredCollapsedSections(): Partial<Record<SectionKey, boolean>> {
+  try {
+    const raw = localStorage.getItem(STORAGE_ACCORDION_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed;
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return {};
+}
+
+export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
+  const { events, getEventAttendees } = useApp();
+  const prefersReduced = Boolean(useReducedMotion());
+
+  const [sortMode, setSortMode] = useState<'soonest' | 'buddies'>('soonest');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedLocation, setSelectedLocation] = useState<LocationBucket>('all');
@@ -86,50 +143,135 @@ export const FeedTab: React.FC<FeedTabProps> = ({
   const [selectedFaculty, setSelectedFaculty] = useState<string>('all');
   const [priceFilter, setPriceFilter] = useState<'all' | 'free' | 'paid'>('all');
 
-  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
-  const [dateDropdownOpen, setDateDropdownOpen] = useState(false);
-  const [selectedEventForDetail, setSelectedEventForDetail] = useState<EventItem | null>(null);
-  const [avatarError, setAvatarError] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() =>
+    readStoredBool(STORAGE_OPEN_KEY, true)
+  );
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => readStoredWidth());
+  const [isResizing, setIsResizing] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState<Partial<Record<SectionKey, boolean>>>(() =>
+    readStoredCollapsedSections()
+  );
+  const [expandedLists, setExpandedLists] = useState<Partial<Record<SectionKey, boolean>>>({});
 
-  const dateDropdownRef = useRef<HTMLDivElement | null>(null);
-  const todayStr = useMemo(() => getWaterlooTodayStr(), []);
+  const [customRangeOpen, setCustomRangeOpen] = useState(false);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const [selectedEventForDetail, setSelectedEventForDetail] = useState<EventItem | null>(null);
+
+  const customRangeRef = useRef<HTMLDivElement | null>(null);
+  const todayStr = getTorontoNow().dateStr;
 
   useEffect(() => {
-    if (!dateDropdownOpen) return;
+    try {
+      localStorage.setItem(STORAGE_OPEN_KEY, sidebarOpen ? '1' : '0');
+    } catch {
+      // ignore storage errors
+    }
+  }, [sidebarOpen]);
 
-    const handleClickOutside = (event: MouseEvent) => {
-      if (dateDropdownRef.current && !dateDropdownRef.current.contains(event.target as Node)) {
-        setDateDropdownOpen(false);
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_WIDTH_KEY, String(sidebarWidth));
+    } catch {
+      // ignore storage errors
+    }
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_ACCORDION_KEY, JSON.stringify(collapsedSections));
+    } catch {
+      // ignore storage errors
+    }
+  }, [collapsedSections]);
+
+  useEffect(() => {
+    if (!customRangeOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (customRangeRef.current && !customRangeRef.current.contains(e.target as Node)) {
+        setCustomRangeOpen(false);
       }
     };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setDateDropdownOpen(false);
-      }
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCustomRangeOpen(false);
     };
-
     document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleEscape);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keydown', handleEscape);
     };
-  }, [dateDropdownOpen]);
+  }, [customRangeOpen]);
 
-  // Published WUSA events
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!sidebarOpen) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    setIsResizing(true);
+
+    const prevUserSelect = document.body.style.userSelect;
+    const prevCursor = document.body.style.cursor;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const delta = moveEvent.clientX - startX;
+      const next = Math.max(
+        SIDEBAR_MIN_WIDTH,
+        Math.min(SIDEBAR_MAX_WIDTH, Math.round(startWidth + delta))
+      );
+      setSidebarWidth(next);
+    };
+
+    const stopResize = () => {
+      setIsResizing(false);
+      document.body.style.userSelect = prevUserSelect;
+      document.body.style.cursor = prevCursor;
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+  };
+
+  const handleResizeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!sidebarOpen) return;
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      setSidebarWidth((w) => Math.max(SIDEBAR_MIN_WIDTH, w - 16));
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      setSidebarWidth((w) => Math.min(SIDEBAR_MAX_WIDTH, w + 16));
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
+    }
+  };
+
+  // Published WUSA and approved community events (non-archived, non-past from AppContext)
   const publishedEvents = useMemo(
-    () => events.filter((e) => e.status !== 'draft' && (e.id.startsWith('wusa_') || e.sourceVerification === 'wusa_official')),
+    () =>
+      events.filter(
+        (e) =>
+          e.status !== 'draft' &&
+          e.status !== 'ended' &&
+          e.moderationStatus !== 'rejected' &&
+          e.moderationStatus !== 'pending_review' &&
+          (e.id.startsWith('wusa_') ||
+            e.sourceVerification === 'wusa_official' ||
+            (e.sourceVerification === 'community_partner' && e.moderationStatus === 'approved'))
+      ),
     [events]
   );
 
-  // Resolve active Date Range bounds & exact display string
   const activeDateRange = useMemo(
     () => resolveDateRange(selectedDateFilter, customStartDate, customEndDate, todayStr),
     [selectedDateFilter, customStartDate, customEndDate, todayStr]
   );
 
-  // Events filtered by non-date filters (used for accurate live date preset counts)
   const baseFilteredEvents = useMemo(() => {
     let filtered = [...publishedEvents];
 
@@ -169,16 +311,8 @@ export const FeedTab: React.FC<FeedTabProps> = ({
     }
 
     return filtered;
-  }, [
-    publishedEvents,
-    searchQuery,
-    selectedCategory,
-    selectedLocation,
-    selectedFaculty,
-    priceFilter
-  ]);
+  }, [publishedEvents, searchQuery, selectedCategory, selectedLocation, selectedFaculty, priceFilter]);
 
-  // Counts for left filter panel (react to selected date range so list/map stay consistent)
   const dateFilteredEvents = useMemo(
     () => publishedEvents.filter((e) => eventOverlapsDateRange(e, activeDateRange)),
     [publishedEvents, activeDateRange]
@@ -192,6 +326,19 @@ export const FeedTab: React.FC<FeedTabProps> = ({
     return counts;
   }, [dateFilteredEvents]);
 
+  const facultyCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: dateFilteredEvents.length };
+    for (const fac of UW_FACULTIES) {
+      counts[fac] = dateFilteredEvents.filter(
+        (e) =>
+          !e.facultyAffiliation ||
+          e.facultyAffiliation === 'All Faculties' ||
+          e.facultyAffiliation === fac
+      ).length;
+    }
+    return counts;
+  }, [dateFilteredEvents]);
+
   const locationCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const loc of LOCATION_BUCKETS) {
@@ -200,669 +347,469 @@ export const FeedTab: React.FC<FeedTabProps> = ({
     return counts;
   }, [dateFilteredEvents]);
 
-  const priceCounts = useMemo(() => ({
-    all: dateFilteredEvents.length,
-    free: dateFilteredEvents.filter((e) => e.isFree).length,
-    paid: dateFilteredEvents.filter((e) => !e.isFree).length
-  }), [dateFilteredEvents]);
+  const priceCounts = useMemo(
+    () => ({
+      all: dateFilteredEvents.length,
+      free: dateFilteredEvents.filter((e) => e.isFree).length,
+      paid: dateFilteredEvents.filter((e) => !e.isFree).length
+    }),
+    [dateFilteredEvents]
+  );
 
-  // Date preset ranges & live overlap counts
   const datePresetSummaries = useMemo(() => {
-    const presets: { id: Exclude<DateRangePreset, 'custom'>; label: string; hint?: string }[] = [
-      { id: 'all', label: 'All dates' },
+    const presets: { id: Exclude<DateRangePreset, 'all' | 'custom'>; label: string }[] = [
       { id: 'today', label: 'Today' },
-      { id: 'thisWeek', label: 'This week', hint: 'Mon–Sun' },
-      { id: 'thisWeekend', label: 'This weekend', hint: 'Sat–Sun' },
-      { id: 'nextWeek', label: 'Next week', hint: 'Mon–Sun' }
+      { id: 'thisWeek', label: 'This week' },
+      { id: 'thisWeekend', label: 'This weekend' },
+      { id: 'nextWeek', label: 'Next week' }
     ];
 
     return presets.map((p) => {
       const resolved = resolveDateRange(p.id, '', '', todayStr);
       const count = baseFilteredEvents.filter((e) => eventOverlapsDateRange(e, resolved)).length;
-      return {
-        ...p,
-        resolved,
-        count
-      };
+      return { ...p, resolved, count };
     });
   }, [baseFilteredEvents, todayStr]);
 
-  const activeFiltersCount = useMemo(() => {
-    let count = 0;
-    if (selectedCategory !== 'all') count++;
-    if (selectedLocation !== 'all') count++;
-    if (selectedDateFilter !== 'all') count++;
-    if (selectedFaculty !== 'all') count++;
-    if (priceFilter !== 'all') count++;
-    return count;
-  }, [selectedCategory, selectedLocation, selectedDateFilter, selectedFaculty, priceFilter]);
+  const sidebarFiltersCount =
+    (selectedCategory !== 'all' ? 1 : 0) +
+    (selectedFaculty !== 'all' ? 1 : 0) +
+    (selectedLocation !== 'all' ? 1 : 0) +
+    (priceFilter !== 'all' ? 1 : 0);
 
-  const hasAnyFilterOrSearch = activeFiltersCount > 0 || Boolean(searchQuery.trim());
+  const activeChips = useMemo(() => {
+    const chips: { key: string; label: string; onClear: () => void }[] = [];
+    if (searchQuery.trim()) {
+      chips.push({
+        key: 'search',
+        label: `"${searchQuery.trim()}"`,
+        onClear: () => setSearchQuery('')
+      });
+    }
+    if (selectedDateFilter !== 'all' && activeDateRange.isFiltered) {
+      chips.push({
+        key: 'date',
+        label: activeDateRange.exactLabel,
+        onClear: () => {
+          setSelectedDateFilter('all');
+          setCustomStartDate('');
+          setCustomEndDate('');
+        }
+      });
+    }
+    if (selectedCategory !== 'all') {
+      chips.push({
+        key: 'category',
+        label: selectedCategory,
+        onClear: () => setSelectedCategory('all')
+      });
+    }
+    if (selectedFaculty !== 'all') {
+      chips.push({
+        key: 'faculty',
+        label: selectedFaculty,
+        onClear: () => setSelectedFaculty('all')
+      });
+    }
+    if (selectedLocation !== 'all') {
+      const locLabel =
+        LOCATION_BUCKETS.find((l) => l.id === selectedLocation)?.label || selectedLocation;
+      chips.push({
+        key: 'location',
+        label: locLabel,
+        onClear: () => setSelectedLocation('all')
+      });
+    }
+    if (priceFilter !== 'all') {
+      chips.push({
+        key: 'price',
+        label: priceFilter === 'free' ? 'Free only' : 'Paid only',
+        onClear: () => setPriceFilter('all')
+      });
+    }
+    return chips;
+  }, [
+    searchQuery,
+    selectedDateFilter,
+    activeDateRange,
+    selectedCategory,
+    selectedFaculty,
+    selectedLocation,
+    priceFilter
+  ]);
 
-  const resetAllFilters = () => {
-    setSearchQuery('');
+  const hasAnyFilterOrSearch = activeChips.length > 0;
+
+  const resetSidebarFilters = () => {
     setSelectedCategory('all');
-    setSelectedLocation('all');
-    setSelectedDateFilter('all');
-    setCustomStartDate('');
-    setCustomEndDate('');
     setSelectedFaculty('all');
+    setSelectedLocation('all');
     setPriceFilter('all');
   };
 
-  const resetDateFilterOnly = () => {
+  const resetAllFilters = () => {
+    setSearchQuery('');
+    resetSidebarFilters();
     setSelectedDateFilter('all');
     setCustomStartDate('');
     setCustomEndDate('');
   };
 
-  // Filtered and ranked events (shared across List and Map views)
   const displayedEvents = useMemo(() => {
     const filtered = baseFilteredEvents.filter((e) => eventOverlapsDateRange(e, activeDateRange));
+    const compareSoonest = (a: EventItem, b: EventItem) =>
+      a.date !== b.date
+        ? a.date.localeCompare(b.date)
+        : a.startTime.localeCompare(b.startTime);
 
-    if (feedMode === 'forYou') {
-      return rankForYouEvents(filtered);
-    } else {
-      return [...filtered].sort((a, b) => (a.date > b.date ? 1 : -1));
+    if (sortMode === 'buddies') {
+      return [...filtered].sort((a, b) => {
+        const countDiff = getEventAttendees(b.id).length - getEventAttendees(a.id).length;
+        return countDiff !== 0 ? countDiff : compareSoonest(a, b);
+      });
     }
-  }, [baseFilteredEvents, activeDateRange, feedMode, rankForYouEvents]);
 
-  const renderFilterSections = () => (
-    <div className="space-y-6">
-      {/* Categories */}
-      <div className="space-y-2.5">
-        <h3 className="text-xs font-semibold text-stone-400 tracking-wide">
-          Categories
-        </h3>
-        <div className="space-y-1">
-          <button
-            type="button"
-            onClick={() => setSelectedCategory('all')}
-            className="w-full flex items-center justify-between py-1.5 text-left group cursor-pointer"
-          >
-            <span className="flex items-center gap-2.5 min-w-0">
-              <span
-                className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 transition-colors ${
-                  selectedCategory === 'all'
-                    ? 'border-stone-950 bg-amber-400'
-                    : 'border-stone-300 bg-white group-hover:border-stone-400'
-                }`}
-              >
-                {selectedCategory === 'all' && <span className="w-1.5 h-1.5 rounded-full bg-stone-950" />}
-              </span>
-              <span
-                className={`text-xs truncate ${
-                  selectedCategory === 'all' ? 'font-bold text-stone-950' : 'text-stone-700 group-hover:text-stone-950'
-                }`}
-              >
-                All Categories
-              </span>
-            </span>
-            <span className="text-xs text-stone-400 tabular-nums shrink-0 pl-2">
-              {categoryCounts.all}
-            </span>
-          </button>
+    return [...filtered].sort(compareSoonest);
+  }, [baseFilteredEvents, activeDateRange, sortMode, getEventAttendees]);
 
-          {EVENT_CATEGORIES.map((cat) => {
-            const active = selectedCategory === cat;
-            return (
-              <button
-                key={cat}
-                type="button"
-                onClick={() => setSelectedCategory(cat)}
-                className="w-full flex items-center justify-between py-1.5 text-left group cursor-pointer"
-              >
-                <span className="flex items-center gap-2.5 min-w-0">
-                  <span
-                    className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 transition-colors ${
-                      active
-                        ? 'border-stone-950 bg-amber-400'
-                        : 'border-stone-300 bg-white group-hover:border-stone-400'
-                    }`}
-                  >
-                    {active && <span className="w-1.5 h-1.5 rounded-full bg-stone-950" />}
-                  </span>
-                  <span
-                    className={`text-xs truncate ${
-                      active ? 'font-bold text-stone-950' : 'text-stone-700 group-hover:text-stone-950'
-                    }`}
-                  >
-                    {cat}
-                  </span>
-                </span>
-                <span className="text-xs text-stone-400 tabular-nums shrink-0 pl-2">
-                  {categoryCounts[cat] ?? 0}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+  const toggleAccordion = (key: SectionKey) => {
+    setCollapsedSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
-      <div className="border-t border-stone-100" />
+  const toggleShowMore = (key: SectionKey) => {
+    setExpandedLists((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
-      {/* Campus Location */}
-      <div className="space-y-2.5">
-        <h3 className="text-xs font-semibold text-stone-400 tracking-wide">
-          Location
-        </h3>
-        <div className="space-y-1">
-          {LOCATION_BUCKETS.map((loc) => {
-            const active = selectedLocation === loc.id;
-            return (
-              <button
-                key={loc.id}
-                type="button"
-                onClick={() => setSelectedLocation(loc.id)}
-                className="w-full flex items-center justify-between py-1.5 text-left group cursor-pointer"
-              >
-                <span className="flex items-center gap-2.5 min-w-0">
-                  <span
-                    className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 transition-colors ${
-                      active
-                        ? 'border-stone-950 bg-amber-400'
-                        : 'border-stone-300 bg-white group-hover:border-stone-400'
-                    }`}
-                  >
-                    {active && <span className="w-1.5 h-1.5 rounded-full bg-stone-950" />}
-                  </span>
-                  <span
-                    className={`text-xs truncate ${
-                      active ? 'font-bold text-stone-950' : 'text-stone-700 group-hover:text-stone-950'
-                    }`}
-                  >
-                    {loc.label}
-                  </span>
-                </span>
-                <span className="text-xs text-stone-400 tabular-nums shrink-0 pl-2">
-                  {locationCounts[loc.id] ?? 0}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="border-t border-stone-100" />
-
-      {/* Price Level */}
-      <div className="space-y-2.5">
-        <h3 className="text-xs font-semibold text-stone-400 tracking-wide">
-          Price Level
-        </h3>
-        <div className="space-y-1">
-          {[
-            { id: 'all' as const, label: 'All Events', count: priceCounts.all },
-            { id: 'free' as const, label: 'Free ($0)', count: priceCounts.free },
-            { id: 'paid' as const, label: 'Ticketed ($)', count: priceCounts.paid }
-          ].map((opt) => {
-            const active = priceFilter === opt.id;
-            return (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setPriceFilter(opt.id)}
-                className="w-full flex items-center justify-between py-1.5 text-left group cursor-pointer"
-              >
-                <span className="flex items-center gap-2.5 min-w-0">
-                  <span
-                    className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 transition-colors ${
-                      active
-                        ? 'border-stone-950 bg-amber-400'
-                        : 'border-stone-300 bg-white group-hover:border-stone-400'
-                    }`}
-                  >
-                    {active && <span className="w-1.5 h-1.5 rounded-full bg-stone-950" />}
-                  </span>
-                  <span
-                    className={`text-xs truncate ${
-                      active ? 'font-bold text-stone-950' : 'text-stone-700 group-hover:text-stone-950'
-                    }`}
-                  >
-                    {opt.label}
-                  </span>
-                </span>
-                <span className="text-xs text-stone-400 tabular-nums shrink-0 pl-2">
-                  {opt.count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="border-t border-stone-100" />
-
-      {/* Faculty */}
-      <div className="space-y-2">
-        <label htmlFor="faculty-filter" className="block text-xs font-semibold text-stone-400 tracking-wide">
-          Faculty Affiliation
-        </label>
-        <select
-          id="faculty-filter"
-          value={selectedFaculty}
-          onChange={(e) => setSelectedFaculty(e.target.value)}
-          className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50/70 text-xs font-medium text-stone-800 focus:outline-none focus:ring-2 focus:ring-amber-400 cursor-pointer"
-        >
-          <option value="all">All Faculties</option>
-          {UW_FACULTIES.map((fac) => (
-            <option key={fac} value={fac}>
-              {fac}
-            </option>
-          ))}
-        </select>
-      </div>
-    </div>
+  const FilterSectionOption: React.FC<{
+    active: boolean;
+    label: string;
+    count: number;
+    onClick: () => void;
+  }> = ({ active, label, count, onClick }) => (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl text-xs transition-colors cursor-pointer text-left ${
+        active
+          ? 'bg-accent-soft text-ink font-semibold'
+          : 'text-muted hover:text-ink hover:bg-surface-soft/50'
+      }`}
+    >
+      <span className="flex items-center gap-2 min-w-0">
+        <span
+          className={`w-2 h-2 rounded-full shrink-0 transition-colors ${
+            active ? 'bg-accent ring-2 ring-accent/30' : 'bg-line'
+          }`}
+        />
+        <span className="truncate">{label}</span>
+      </span>
+      <span className="text-[11px] tabular-nums shrink-0 opacity-80">{count}</span>
+    </button>
   );
 
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-[276px_minmax(0,1fr)] gap-6 lg:gap-7 items-start">
-      {/* LEFT COLUMN: Top-Left Student Profile Card + Left Filters Sidebar */}
-      <aside className="space-y-4 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:flex lg:flex-col">
-        {/* TOP-LEFT STUDENT PROFILE CARD (Waterloo Goose Avatar) */}
-        <section
-          aria-label="Student Profile"
-          className="bg-white rounded-2xl border border-stone-200/80 p-4 shadow-xs shrink-0"
-        >
-          {user ? (
-            <div className="space-y-3.5">
-              <div className="flex items-center gap-3.5">
-                <button
-                  type="button"
-                  onClick={onOpenProfile}
-                  className="relative shrink-0 cursor-pointer group focus:outline-none"
-                  title="Open Student Profile"
-                >
-                  {!avatarError && user.avatar ? (
-                    <img
-                      src={user.avatar}
-                      alt={`${user.name} Waterloo goose avatar`}
-                      referrerPolicy="no-referrer"
-                      onError={() => setAvatarError(true)}
-                      className="w-14 h-14 rounded-full object-cover border-2 border-amber-400 shadow-2xs group-hover:scale-105 transition-transform"
-                    />
-                  ) : (
-                    <div className="w-14 h-14 rounded-full bg-amber-100 border-2 border-amber-400 flex items-center justify-center text-stone-900">
-                      <UserIcon className="w-6 h-6" />
-                    </div>
-                  )}
-                </button>
+  const renderAccordionSection = (
+    key: SectionKey,
+    title: string,
+    options: { id: string; label: string; count: number; active: boolean; onClick: () => void }[],
+    withTopDivider: boolean
+  ) => {
+    const isCollapsed = Boolean(collapsedSections[key]);
+    const isExpanded = Boolean(expandedLists[key]);
+    const hasOverflow = options.length > 6;
+    const visibleOptions = hasOverflow && !isExpanded ? options.slice(0, 6) : options;
 
-                <div className="min-w-0 flex-1">
+    return (
+      <div className={withTopDivider ? 'pt-3.5 border-t border-line' : ''}>
+        <button
+          type="button"
+          onClick={() => toggleAccordion(key)}
+          aria-expanded={!isCollapsed}
+          className="w-full flex items-center justify-between px-2.5 py-1 text-left cursor-pointer group"
+        >
+          <span className="text-xs font-semibold text-ink">{title}</span>
+          <ChevronDown
+            className={`w-3.5 h-3.5 text-muted group-hover:text-ink ${
+              prefersReduced ? '' : 'transition-transform duration-150'
+            } ${isCollapsed ? '-rotate-90' : ''}`}
+          />
+        </button>
+
+        {!isCollapsed && (
+          <div className="mt-1.5 space-y-0.5">
+            {visibleOptions.map((opt) => (
+              <FilterSectionOption
+                key={opt.id}
+                active={opt.active}
+                label={opt.label}
+                count={opt.count}
+                onClick={opt.onClick}
+              />
+            ))}
+            {hasOverflow && (
+              <button
+                type="button"
+                onClick={() => toggleShowMore(key)}
+                className="px-2.5 py-1 text-xs font-semibold text-accent-text hover:underline cursor-pointer"
+              >
+                {isExpanded ? 'Show less' : `Show more (${options.length - 6})`}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderFilterGroups = () => {
+    const categoryOptions = [
+      {
+        id: 'all',
+        label: 'All categories',
+        count: categoryCounts.all,
+        active: selectedCategory === 'all',
+        onClick: () => setSelectedCategory('all')
+      },
+      ...EVENT_CATEGORIES.map((cat) => ({
+        id: cat,
+        label: cat,
+        count: categoryCounts[cat] ?? 0,
+        active: selectedCategory === cat,
+        onClick: () => setSelectedCategory(cat)
+      }))
+    ];
+
+    const facultyOptions = [
+      {
+        id: 'all',
+        label: 'All Faculties',
+        count: facultyCounts.all,
+        active: selectedFaculty === 'all',
+        onClick: () => setSelectedFaculty('all')
+      },
+      ...UW_FACULTIES.map((fac) => ({
+        id: fac,
+        label: fac,
+        count: facultyCounts[fac] ?? 0,
+        active: selectedFaculty === fac,
+        onClick: () => setSelectedFaculty(fac)
+      }))
+    ];
+
+    const locationOptions = LOCATION_BUCKETS.map((loc) => ({
+      id: loc.id,
+      label: loc.label,
+      count: locationCounts[loc.id] ?? 0,
+      active: selectedLocation === loc.id,
+      onClick: () => setSelectedLocation(loc.id)
+    }));
+
+    const priceOptions = [
+      {
+        id: 'all',
+        label: 'All prices',
+        count: priceCounts.all,
+        active: priceFilter === 'all',
+        onClick: () => setPriceFilter('all')
+      },
+      {
+        id: 'free',
+        label: 'Free',
+        count: priceCounts.free,
+        active: priceFilter === 'free',
+        onClick: () => setPriceFilter('free')
+      },
+      {
+        id: 'paid',
+        label: 'Paid',
+        count: priceCounts.paid,
+        active: priceFilter === 'paid',
+        onClick: () => setPriceFilter('paid')
+      }
+    ];
+
+    return (
+      <div className="space-y-3.5">
+        {renderAccordionSection('category', 'Categories', categoryOptions, false)}
+        {renderAccordionSection('faculty', 'Faculty', facultyOptions, true)}
+        {renderAccordionSection('location', 'Location', locationOptions, true)}
+        {renderAccordionSection('price', 'Price', priceOptions, true)}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Top Header */}
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+        <div>
+          <h1 className="font-display text-2xl sm:text-3xl font-bold text-ink tracking-tight">
+            Campus Events
+          </h1>
+          <p className="text-sm text-muted mt-1 tabular-nums">
+            Showing <strong className="text-ink font-semibold">{displayedEvents.length}</strong>{' '}
+            {displayedEvents.length === 1 ? 'event' : 'events'}
+          </p>
+        </div>
+
+        {/* Filters Toggle + Sort */}
+        <div className="flex items-center gap-2.5 self-start sm:self-auto">
+          {/* Desktop Sidebar Toggle */}
+          <button
+            type="button"
+            onClick={() => setSidebarOpen((prev) => !prev)}
+            aria-expanded={sidebarOpen}
+            className="hidden md:inline-flex h-10 px-3.5 rounded-2xl border border-line bg-surface hover:bg-surface-soft text-ink text-xs font-semibold items-center gap-2 shadow-soft cursor-pointer transition-colors"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent-text" />
+            <span>Filters</span>
+            {sidebarFiltersCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-accent text-accent-ink text-xs font-bold tabular-nums leading-none">
+                {sidebarFiltersCount}
+              </span>
+            )}
+          </button>
+
+          {/* Mobile Drawer Trigger */}
+          <button
+            type="button"
+            onClick={() => setMobileDrawerOpen(true)}
+            className="md:hidden h-10 px-3.5 rounded-2xl border border-line bg-surface text-ink text-xs font-semibold flex items-center gap-2 shadow-soft cursor-pointer"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent-text" />
+            <span>Filters</span>
+            {sidebarFiltersCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-accent text-accent-ink text-xs font-bold tabular-nums leading-none">
+                {sidebarFiltersCount}
+              </span>
+            )}
+          </button>
+
+          <div className="relative">
+            <label htmlFor="events-sort" className="sr-only">
+              Sort by
+            </label>
+            <select
+              id="events-sort"
+              value={sortMode}
+              onChange={(e) => setSortMode(e.target.value as 'soonest' | 'buddies')}
+              className="h-10 pl-3.5 pr-9 rounded-2xl border border-line bg-surface text-ink text-xs font-semibold shadow-soft appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="soonest">Sort by: Soonest</option>
+              <option value="buddies">Sort by: Most buddies</option>
+            </select>
+            <ChevronDown className="w-3.5 h-3.5 text-muted absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          </div>
+        </div>
+      </div>
+
+      {/* Responsive 2-Column Layout: Collapsible/Resizable Sidebar + Fluid Auto-Fill Grid */}
+      <div className="flex flex-col md:flex-row gap-6 items-start">
+        {/* Desktop Collapsible & Resizable Filter Sidebar (md and up) */}
+        <aside
+          aria-label="Event filters"
+          style={{ width: sidebarOpen ? sidebarWidth : COLLAPSED_RAIL_WIDTH }}
+          className={`hidden md:block shrink-0 sticky top-20 self-start relative ${
+            isResizing || prefersReduced ? '' : 'transition-[width] duration-200 ease-out'
+          }`}
+        >
+          {sidebarOpen ? (
+            <div className="relative bg-surface rounded-3xl border border-line shadow-soft flex flex-col max-h-[calc(100vh-6.5rem)]">
+              <div className="px-5 pt-5 pb-3 border-b border-line flex items-center justify-between gap-2 shrink-0">
+                <h2 className="font-display text-base font-bold text-ink">Filters</h2>
+                <div className="flex items-center gap-2">
+                  {sidebarFiltersCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={resetSidebarFilters}
+                      className="text-xs font-semibold text-accent-text hover:underline cursor-pointer flex items-center gap-1"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Reset</span>
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={onOpenProfile}
-                    className="text-left group cursor-pointer focus:outline-none w-full"
+                    onClick={() => setSidebarOpen(false)}
+                    aria-label="Collapse filters sidebar"
+                    title="Collapse filters"
+                    className="w-7 h-7 rounded-xl text-muted hover:text-ink hover:bg-surface-soft flex items-center justify-center transition-colors cursor-pointer"
                   >
-                    <h2 className="text-sm font-bold text-stone-950 truncate group-hover:text-amber-700 transition-colors">
-                      {user.name}
-                    </h2>
-                    <p className="text-xs text-stone-500 truncate mt-0.5">
-                      {user.program} · {user.year}
-                    </p>
+                    <ChevronLeft className="w-4 h-4" />
                   </button>
-
-                  <div className="flex items-center gap-1.5 mt-1 text-[11px] font-medium">
-                    <ShieldCheck className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                    <span className="text-stone-700 truncate">
-                      {user.isVerifiedUWStudent ? 'UW Verified' : 'Unverified UW'} · {user.faculty}
-                    </span>
-                  </div>
                 </div>
               </div>
 
-              {/* Compact Going / Saved stats + Profile link */}
-              <div className="pt-3 border-t border-stone-100 flex items-center justify-between gap-2 text-xs">
-                <div className="flex items-center gap-2 text-stone-600 tabular-nums">
-                  <span>
-                    <strong className="text-stone-950 font-bold">{attendingEventIds.length}</strong> Going
-                  </span>
-                  <span aria-hidden="true" className="text-stone-300">·</span>
-                  <span>
-                    <strong className="text-stone-950 font-bold">{savedEventIds.length}</strong> Saved
-                  </span>
-                </div>
+              <div className="p-5 overflow-y-auto filters-scroll flex-1">
+                {renderFilterGroups()}
+              </div>
 
-                {onOpenProfile && (
-                  <button
-                    type="button"
-                    onClick={onOpenProfile}
-                    className="text-xs font-semibold text-stone-900 hover:text-amber-700 flex items-center gap-1 cursor-pointer whitespace-nowrap"
-                  >
-                    <span>Profile</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
-                )}
+              {/* Draggable & Keyboard-Accessible Right-Edge Resize Handle */}
+              <div
+                role="separator"
+                tabIndex={0}
+                aria-orientation="vertical"
+                aria-label="Resize filters sidebar"
+                aria-valuemin={SIDEBAR_MIN_WIDTH}
+                aria-valuemax={SIDEBAR_MAX_WIDTH}
+                aria-valuenow={sidebarWidth}
+                onPointerDown={startResize}
+                onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT_WIDTH)}
+                onKeyDown={handleResizeKeyDown}
+                title="Drag to resize or double-click to reset"
+                className="group absolute top-4 bottom-4 -right-1.5 w-3 cursor-col-resize touch-none flex items-center justify-center rounded-full focus-visible:outline-2"
+              >
+                <span className="w-1 h-10 rounded-full bg-line group-hover:bg-accent group-focus-visible:bg-accent transition-colors" />
               </div>
             </div>
           ) : (
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-full bg-amber-100 border-2 border-amber-400 flex items-center justify-center text-stone-900 shrink-0">
-                  <UserIcon className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <h2 className="text-sm font-bold text-stone-950">Waterloo Guest</h2>
-                  <p className="text-xs text-stone-500">Sign in for buddy matching</p>
-                </div>
-              </div>
+            /* Collapsed 48px Slim Rail */
+            <div className="bg-surface rounded-2xl border border-line shadow-soft py-3 flex flex-col items-center gap-3">
               <button
                 type="button"
-                onClick={onOpenAuth}
-                className="w-full py-2 px-3 rounded-xl bg-stone-950 hover:bg-stone-800 text-amber-400 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                onClick={() => setSidebarOpen(true)}
+                aria-label="Expand filters sidebar"
+                title="Expand filters"
+                className="w-8 h-8 rounded-xl text-ink hover:bg-surface-soft flex items-center justify-center transition-colors cursor-pointer"
               >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>Sign In / Demo Login</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(true)}
+                aria-label={`Open filters (${sidebarFiltersCount} active)`}
+                title="Filters"
+                className="relative w-8 h-8 rounded-xl text-accent-text hover:bg-surface-soft flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <SlidersHorizontal className="w-4 h-4" />
+                {sidebarFiltersCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-accent-ink text-[11px] font-bold tabular-nums flex items-center justify-center leading-none">
+                    {sidebarFiltersCount}
+                  </span>
+                )}
               </button>
             </div>
           )}
-        </section>
+        </aside>
 
-        {/* LEFT FILTERS PANEL (Desktop) */}
-        <section
-          aria-label="Event Filters"
-          className="hidden lg:flex lg:flex-col bg-white rounded-2xl border border-stone-200/80 shadow-xs min-h-0 flex-1 overflow-hidden"
-        >
-          <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-stone-100 shrink-0">
-            <h2 className="text-lg font-bold text-stone-950 tracking-tight">Filters</h2>
-            <button
-              type="button"
-              onClick={resetAllFilters}
-              className={`text-xs font-semibold transition-colors cursor-pointer ${
-                activeFiltersCount > 0 || searchQuery
-                  ? 'text-amber-700 hover:text-amber-900'
-                  : 'text-stone-400 hover:text-stone-600'
-              }`}
-            >
-              Reset
-            </button>
-          </div>
-
-          <div className="p-5 pt-4 overflow-y-auto flex-1 min-h-0 filters-scroll">
-            {renderFilterSections()}
-          </div>
-        </section>
-      </aside>
-
-      {/* RIGHT COLUMN: Top Header + Compact Top-Right Expandable Date Range + Search + Listings */}
-      <div className="min-w-0 space-y-4">
-        {/* Top Row: Title/Summary on Left + Controls & Compact Expandable Date Range on Top Right */}
-        <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-3">
-          <div>
-            <h1 className="text-xl sm:text-2xl font-bold text-stone-950 tracking-tight">
-              Waterloo Campus Events
-            </h1>
-            <p className="text-xs sm:text-sm text-stone-500 mt-0.5 tabular-nums">
-              Showing <strong className="text-stone-900 font-semibold">{displayedEvents.length}</strong> of {publishedEvents.length} official WUSA events across campus.
-            </p>
-          </div>
-
-          {/* Top-Right Controls: Feed Mode + View Mode + Compact Expandable Date Range */}
-          <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 shrink-0">
-            <div className="flex items-center gap-2">
-              <div className="flex items-center p-1 bg-white rounded-xl border border-stone-200/80 shadow-2xs">
-                <button
-                  type="button"
-                  onClick={() => setFeedMode('forYou')}
-                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                    feedMode === 'forYou'
-                      ? 'bg-stone-950 text-amber-300'
-                      : 'text-stone-600 hover:text-stone-950'
-                  }`}
-                >
-                  For You
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFeedMode('all')}
-                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                    feedMode === 'all'
-                      ? 'bg-stone-950 text-amber-300'
-                      : 'text-stone-600 hover:text-stone-950'
-                  }`}
-                >
-                  All Events
-                </button>
-              </div>
-
-              <div className="flex items-center p-1 bg-white rounded-xl border border-stone-200/80 shadow-2xs">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('list')}
-                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    viewMode === 'list'
-                      ? 'bg-amber-400 text-stone-950 font-bold'
-                      : 'text-stone-600 hover:text-stone-950'
-                  }`}
-                >
-                  <List className="w-3.5 h-3.5" />
-                  <span>Grid</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('map')}
-                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    viewMode === 'map'
-                      ? 'bg-amber-400 text-stone-950 font-bold'
-                      : 'text-stone-600 hover:text-stone-950'
-                  }`}
-                >
-                  <MapPin className="w-3.5 h-3.5" />
-                  <span>Map</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Compact Expandable Date Range Trigger (Top Right) */}
-            <div ref={dateDropdownRef} className="relative ml-auto sm:ml-0">
-              <button
-                type="button"
-                onClick={() => setDateDropdownOpen((prev) => !prev)}
-                aria-expanded={dateDropdownOpen}
-                aria-haspopup="dialog"
-                className={`h-[38px] px-3 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shadow-2xs ${
-                  selectedDateFilter !== 'all' || dateDropdownOpen
-                    ? 'bg-amber-50 border-amber-300 text-stone-950'
-                    : 'bg-white border-stone-200/80 text-stone-700 hover:border-stone-300 hover:text-stone-950'
-                }`}
-              >
-                <Calendar
-                  className={`w-3.5 h-3.5 shrink-0 ${
-                    selectedDateFilter !== 'all' ? 'text-amber-700' : 'text-stone-500'
-                  }`}
-                />
-                <span className="max-w-[165px] truncate tabular-nums">
-                  {selectedDateFilter === 'all' ? 'Date range' : activeDateRange.exactLabel}
-                </span>
-                <ChevronDown
-                  className={`w-3.5 h-3.5 shrink-0 text-stone-400 transition-transform duration-150 ${
-                    dateDropdownOpen ? 'rotate-180 text-stone-700' : ''
-                  }`}
-                />
-              </button>
-
-              {/* Expandable Vertical Date Range Options */}
-              {dateDropdownOpen && (
-                <div
-                  role="dialog"
-                  aria-label="Date Range Filter"
-                  className="absolute right-0 top-full mt-2 z-[1100] w-[min(17.5rem,calc(100vw-2rem))] bg-white rounded-2xl border border-stone-200/90 shadow-xl p-3.5 space-y-2.5"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-stone-950">Date Range</span>
-                    {selectedDateFilter !== 'all' ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          resetDateFilterOnly();
-                          setDateDropdownOpen(false);
-                        }}
-                        className="text-[11px] font-semibold text-amber-700 hover:text-amber-900 cursor-pointer"
-                      >
-                        Reset
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setDateDropdownOpen(false)}
-                        className="p-0.5 text-stone-400 hover:text-stone-700 rounded cursor-pointer"
-                        aria-label="Close date range"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Vertical Preset List */}
-                  <div className="space-y-0.5">
-                    {datePresetSummaries.map((opt) => {
-                      const active = selectedDateFilter === opt.id;
-                      return (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedDateFilter(opt.id);
-                            setDateDropdownOpen(false);
-                          }}
-                          className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                            active ? 'bg-amber-50/90' : 'hover:bg-stone-50'
-                          }`}
-                        >
-                          <span className="flex items-center gap-2 min-w-0">
-                            <span
-                              className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 transition-colors ${
-                                active
-                                  ? 'border-stone-950 bg-amber-400'
-                                  : 'border-stone-300 bg-white'
-                              }`}
-                            >
-                              {active && <span className="w-1.5 h-1.5 rounded-full bg-stone-950" />}
-                            </span>
-                            <span
-                              className={`text-xs truncate ${
-                                active ? 'font-bold text-stone-950' : 'text-stone-700'
-                              }`}
-                            >
-                              {opt.label}
-                            </span>
-                            {opt.hint && (
-                              <span className="text-[10px] text-stone-400 shrink-0">
-                                {opt.hint}
-                              </span>
-                            )}
-                          </span>
-                          <span className="text-[11px] text-stone-400 tabular-nums shrink-0 pl-2">
-                            {opt.count}
-                          </span>
-                        </button>
-                      );
-                    })}
-
-                    {/* Custom date range option */}
-                    <button
-                      type="button"
-                      onClick={() => setSelectedDateFilter('custom')}
-                      className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                        selectedDateFilter === 'custom' ? 'bg-amber-50/90' : 'hover:bg-stone-50'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2 min-w-0">
-                        <span
-                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 transition-colors ${
-                            selectedDateFilter === 'custom'
-                              ? 'border-stone-950 bg-amber-400'
-                              : 'border-stone-300 bg-white'
-                          }`}
-                        >
-                          {selectedDateFilter === 'custom' && (
-                            <span className="w-1.5 h-1.5 rounded-full bg-stone-950" />
-                          )}
-                        </span>
-                        <span
-                          className={`text-xs truncate ${
-                            selectedDateFilter === 'custom'
-                              ? 'font-bold text-stone-950'
-                              : 'text-stone-700'
-                          }`}
-                        >
-                          Custom date range
-                        </span>
-                      </span>
-                    </button>
-                  </div>
-
-                  {/* Vertical Custom Start / End Date Inputs */}
-                  {selectedDateFilter === 'custom' && (
-                    <div className="pt-2 border-t border-stone-100 space-y-2">
-                      <div className="space-y-1">
-                        <label htmlFor="custom-date-start" className="block text-[11px] font-medium text-stone-500">
-                          Start date
-                        </label>
-                        <input
-                          id="custom-date-start"
-                          type="date"
-                          value={customStartDate}
-                          onChange={(e) => setCustomStartDate(e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-stone-200 bg-stone-50/70 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-400 tabular-nums"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label htmlFor="custom-date-end" className="block text-[11px] font-medium text-stone-500">
-                          End date
-                        </label>
-                        <input
-                          id="custom-date-end"
-                          type="date"
-                          value={customEndDate}
-                          onChange={(e) => setCustomEndDate(e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-stone-200 bg-stone-50/70 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-400 tabular-nums"
-                        />
-                      </div>
-                      {customStartDate && customEndDate && customStartDate > customEndDate && (
-                        <p className="text-[11px] text-amber-700 font-medium">
-                          Dates automatically ordered from earlier to later.
-                        </p>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => setDateDropdownOpen(false)}
-                        className="w-full py-1.5 rounded-lg bg-stone-950 hover:bg-stone-800 text-amber-300 text-xs font-bold transition-colors cursor-pointer"
-                      >
-                        Apply range
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Exact Selected Dates Footer */}
-                  <div className="pt-2 border-t border-stone-100 text-[11px] text-stone-500 flex items-center justify-between gap-2">
-                    <span>Selected:</span>
-                    <span className="font-semibold text-stone-900 tabular-nums text-right truncate">
-                      {activeDateRange.exactLabel}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Search Bar & Mobile Filter Trigger */}
-        <div className="flex items-center gap-2.5">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+        {/* Right Main Column (expands automatically when sidebar shrinks/collapses) */}
+        <div className="min-w-0 flex-1 w-full space-y-5">
+          {/* Search Input */}
+          <div className="relative">
+            <Search className="w-4 h-4 text-muted absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by event title, club, campus building, topic..."
-              className="w-full pl-10 pr-10 py-2.5 rounded-xl border border-stone-200/90 bg-white text-xs sm:text-sm text-stone-950 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400 shadow-2xs"
+              placeholder="Search events, clubs, buildings, or topics..."
+              aria-label="Search campus events"
+              className="w-full pl-11 pr-10 py-3 rounded-2xl border border-line bg-surface text-sm text-ink placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent shadow-soft"
             />
             {searchQuery && (
               <button
                 type="button"
                 onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-muted hover:text-ink rounded-full cursor-pointer"
                 aria-label="Clear search"
               >
                 <X className="w-4 h-4" />
@@ -870,171 +817,245 @@ export const FeedTab: React.FC<FeedTabProps> = ({
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={() => setMobileFiltersOpen(!mobileFiltersOpen)}
-            className={`lg:hidden px-3.5 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 transition-colors shrink-0 cursor-pointer ${
-              activeFiltersCount > 0 || mobileFiltersOpen
-                ? 'bg-amber-400 border-amber-400 text-stone-950'
-                : 'bg-white border-stone-200 text-stone-700 hover:border-stone-300'
-            }`}
-          >
-            <SlidersHorizontal className="w-4 h-4" />
-            <span>Filters</span>
-            {activeFiltersCount > 0 && (
-              <span className="px-1.5 py-0.2 rounded-md bg-stone-950 text-amber-300 text-[10px] font-bold tabular-nums">
-                {activeFiltersCount}
-              </span>
-            )}
-          </button>
-
-          {onOpenWusaCollector && (
-            <button
-              type="button"
-              onClick={onOpenWusaCollector}
-              className="hidden sm:flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-xs font-semibold shrink-0 transition-colors cursor-pointer"
-              title="Open WUSA Collector Database & Sync"
-            >
-              <Database className="w-3.5 h-3.5 text-amber-600" />
-              <span>WUSA Sync</span>
-            </button>
-          )}
-        </div>
-
-        {/* Mobile Collapsible Filters Panel */}
-        {mobileFiltersOpen && (
-          <div className="lg:hidden bg-white rounded-2xl border border-stone-200/80 p-5 shadow-sm space-y-4">
-            <div className="flex items-center justify-between pb-2 border-b border-stone-100">
-              <h3 className="text-base font-bold text-stone-950">Filters</h3>
-              <div className="flex items-center gap-3">
+          {/* Date Filter Bar */}
+          <div className="flex flex-wrap items-center gap-2 relative" ref={customRangeRef}>
+            {datePresetSummaries.map((opt) => {
+              const active = selectedDateFilter === opt.id;
+              return (
                 <button
+                  key={opt.id}
                   type="button"
-                  onClick={resetAllFilters}
-                  className="text-xs font-semibold text-amber-700 hover:text-amber-900"
+                  aria-pressed={active}
+                  onClick={() => {
+                    setSelectedDateFilter((prev) => (prev === opt.id ? 'all' : opt.id));
+                    setCustomRangeOpen(false);
+                  }}
+                  className={`px-3.5 py-2 rounded-2xl text-xs font-semibold transition-colors cursor-pointer tabular-nums ${
+                    active
+                      ? 'bg-accent text-accent-ink shadow-soft'
+                      : 'bg-surface border border-line text-muted hover:text-ink'
+                  }`}
                 >
-                  Clear filters
+                  {opt.label} ({opt.count})
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setMobileFiltersOpen(false)}
-                  className="p-1 text-stone-400 hover:text-stone-700"
-                  aria-label="Close filters"
+              );
+            })}
+
+            <div className="relative">
+              <button
+                type="button"
+                aria-pressed={selectedDateFilter === 'custom'}
+                onClick={() => {
+                  setSelectedDateFilter((prev) =>
+                    prev === 'custom' && customRangeOpen ? 'all' : 'custom'
+                  );
+                  setCustomRangeOpen((prev) => !prev);
+                }}
+                aria-expanded={customRangeOpen}
+                className={`px-3.5 py-2 rounded-2xl text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  selectedDateFilter === 'custom'
+                    ? 'bg-accent text-accent-ink shadow-soft'
+                    : 'bg-surface border border-line text-muted hover:text-ink'
+                }`}
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                <span>Custom range</span>
+              </button>
+
+              {customRangeOpen && (
+                <div
+                  role="dialog"
+                  aria-label="Custom date range"
+                  className="absolute left-0 sm:left-auto sm:right-0 top-full mt-2 z-30 w-72 bg-surface rounded-3xl border border-line shadow-lift p-4 space-y-3"
                 >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-ink">Select date window</span>
+                    <button
+                      type="button"
+                      onClick={() => setCustomRangeOpen(false)}
+                      className="p-1 text-muted hover:text-ink rounded-full cursor-pointer"
+                      aria-label="Close custom range"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label htmlFor="custom-date-start" className="block text-xs text-muted mb-1">
+                        Start date
+                      </label>
+                      <input
+                        id="custom-date-start"
+                        type="date"
+                        value={customStartDate}
+                        onChange={(e) => {
+                          setSelectedDateFilter('custom');
+                          setCustomStartDate(e.target.value);
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded-xl border border-line bg-canvas text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent tabular-nums"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="custom-date-end" className="block text-xs text-muted mb-1">
+                        End date
+                      </label>
+                      <input
+                        id="custom-date-end"
+                        type="date"
+                        value={customEndDate}
+                        onChange={(e) => {
+                          setSelectedDateFilter('custom');
+                          setCustomEndDate(e.target.value);
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded-xl border border-line bg-canvas text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent tabular-nums"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomStartDate('');
+                        setCustomEndDate('');
+                        setSelectedDateFilter('all');
+                        setCustomRangeOpen(false);
+                      }}
+                      className="text-xs font-semibold text-muted hover:text-ink cursor-pointer"
+                    >
+                      Reset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCustomRangeOpen(false)}
+                      className="px-3.5 py-1.5 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-bold cursor-pointer"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
-            {renderFilterSections()}
           </div>
-        )}
 
-        {/* Active Filters, Exact Selected Dates & Personalization Strip */}
-        {(hasAnyFilterOrSearch || (feedMode === 'forYou' && user && onOpenPreferences)) && (
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-500">
+          {/* Active-Filter Chips + Clear All */}
+          {hasAnyFilterOrSearch && (
             <div className="flex flex-wrap items-center gap-2">
-              {selectedDateFilter !== 'all' && (
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-stone-900 bg-amber-100/90 border border-amber-300/80 px-2.5 py-1 rounded-lg tabular-nums">
-                  <Calendar className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                  <span>{activeDateRange.exactLabel}</span>
-                </span>
-              )}
-              {hasAnyFilterOrSearch && (
-                <>
-                  <span className="font-medium text-stone-700">
-                    {activeFiltersCount} filter{activeFiltersCount === 1 ? '' : 's'}
-                    {searchQuery.trim() ? ' + search' : ''} active
-                  </span>
-                  <button
-                    type="button"
-                    onClick={resetAllFilters}
-                    className="text-amber-800 hover:text-amber-950 font-semibold underline underline-offset-2 cursor-pointer"
-                  >
-                    Clear filters
-                  </button>
-                </>
-              )}
-            </div>
-
-            {feedMode === 'forYou' && user && onOpenPreferences && (
-              <div className="flex items-center gap-1.5 ml-auto">
-                <span>Personalized for {user.faculty}</span>
-                <span aria-hidden="true">·</span>
+              {activeChips.map((chip) => (
                 <button
+                  key={chip.key}
                   type="button"
-                  onClick={onOpenPreferences}
-                  className="text-stone-800 hover:text-amber-700 font-semibold underline underline-offset-2 cursor-pointer"
+                  onClick={chip.onClear}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-accent-soft border border-accent/40 text-xs font-semibold text-ink hover:bg-accent/25 transition-colors cursor-pointer"
                 >
-                  Edit interests
+                  <span>{chip.label}</span>
+                  <X className="w-3 h-3 text-accent-text" />
                 </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Feed Content: 3-Column Grid or Campus Map */}
-        {viewMode === 'map' ? (
-          <CampusEventMap
-            events={displayedEvents}
-            onSelectEvent={(ev) => setSelectedEventForDetail(ev)}
-            onClearFilters={resetAllFilters}
-            onSwitchToList={() => setViewMode('list')}
-            activeDateLabel={selectedDateFilter !== 'all' ? activeDateRange.exactLabel : undefined}
-          />
-        ) : displayedEvents.length === 0 ? (
-          <div className="p-10 sm:p-12 bg-white rounded-2xl border border-stone-200/80 text-center space-y-4 shadow-xs">
-            <Calendar className="w-10 h-10 text-stone-300 mx-auto" />
-            <div className="space-y-1.5">
-              <h3 className="font-bold text-stone-950 text-base">
-                No events found{selectedDateFilter !== 'all' ? ` for ${activeDateRange.exactLabel}` : ''}
-              </h3>
-              <p className="text-xs text-stone-500 max-w-md mx-auto leading-relaxed">
-                {selectedDateFilter !== 'all'
-                  ? `No Waterloo events overlap ${activeDateRange.exactLabel} with your current filters. Try another date window or clear your filters to browse all events.`
-                  : 'Try adjusting your search query or clearing your active filters to explore more Waterloo campus events.'}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+              ))}
               <button
                 type="button"
                 onClick={resetAllFilters}
-                className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-stone-950 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                className="text-xs font-semibold text-accent-text hover:underline px-2 py-1 cursor-pointer"
               >
-                Clear filters
+                Clear all
               </button>
-              {datePresetSummaries
-                .filter((p) => p.id !== 'all' && p.id !== selectedDateFilter && p.count > 0)
-                .slice(0, 2)
-                .map((suggestion) => (
+            </div>
+          )}
+
+          {/* Main Grid or Empty State */}
+          {displayedEvents.length === 0 ? (
+            <div className="p-10 sm:p-14 bg-surface rounded-3xl border border-line shadow-soft text-center space-y-5">
+              <div className="flex justify-center">
+                <Goose size={108} state="looking" />
+              </div>
+              <div className="space-y-2">
+                <h2 className="font-display font-bold text-ink text-xl">
+                  No events here. The goose looked everywhere.
+                </h2>
+                <p className="text-sm text-muted max-w-md mx-auto leading-relaxed">
+                  {selectedDateFilter !== 'all'
+                    ? 'Try another date window or clear your active filters to see upcoming Waterloo events.'
+                    : 'Try clearing your search or filters to see what else is buzzing on campus.'}
+                </p>
+              </div>
+              {hasAnyFilterOrSearch && (
+                <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
                   <button
-                    key={suggestion.id}
                     type="button"
-                    onClick={() => setSelectedDateFilter(suggestion.id)}
-                    className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 text-xs font-semibold rounded-xl transition-colors cursor-pointer tabular-nums"
+                    onClick={resetAllFilters}
+                    className="px-5 py-2.5 bg-accent hover:bg-accent-hover text-accent-ink text-xs font-semibold rounded-2xl transition-colors cursor-pointer shadow-soft"
                   >
-                    {suggestion.label} ({suggestion.count})
+                    Clear filters
                   </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <section aria-label="Upcoming campus events">
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5">
+                {displayedEvents.map((event) => (
+                  <EventCard
+                    key={event.id}
+                    event={event}
+                    onSelect={(ev) => setSelectedEventForDetail(ev)}
+                  />
                 ))}
+              </div>
+            </section>
+          )}
+        </div>
+      </div>
+
+      {/* Mobile Filters Slide-Over Drawer (under 768px) */}
+      {mobileDrawerOpen && (
+        <div className="fixed inset-0 z-50 md:hidden flex">
+          <div
+            className="fixed inset-0 bg-black/55 backdrop-blur-xs"
+            onClick={() => setMobileDrawerOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Filters"
+            className="relative ml-auto w-full max-w-xs h-full bg-surface border-l border-line shadow-lift flex flex-col z-10"
+          >
+            <div className="px-5 py-4 border-b border-line flex items-center justify-between">
+              <h2 className="font-display text-lg font-bold text-ink">Filters</h2>
               <button
                 type="button"
-                onClick={() => setViewMode('map')}
-                className="px-4 py-2 bg-stone-950 hover:bg-stone-800 text-amber-300 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                onClick={() => setMobileDrawerOpen(false)}
+                className="p-1.5 text-muted hover:text-ink rounded-full cursor-pointer"
+                aria-label="Close filters drawer"
               >
-                View on Campus Map
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 filters-scroll">
+              {renderFilterGroups()}
+            </div>
+
+            <div className="p-4 border-t border-line bg-surface flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={resetSidebarFilters}
+                disabled={sidebarFiltersCount === 0}
+                className="px-4 py-3 rounded-2xl border border-line bg-canvas text-ink text-xs font-semibold cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                onClick={() => setMobileDrawerOpen(false)}
+                className="flex-1 py-3 rounded-2xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-bold shadow-soft cursor-pointer"
+              >
+                Apply ({displayedEvents.length})
               </button>
             </div>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5">
-            {displayedEvents.map((event) => (
-              <EventCard
-                key={event.id}
-                event={event}
-                onSelect={(ev) => setSelectedEventForDetail(ev)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Event Detail Modal */}
       {selectedEventForDetail && (

@@ -13,7 +13,6 @@ import {
 } from '../types';
 import { DEFAULT_ALEX_QUIZ } from '../utils/compatibilityEngine';
 import { toWaterlooUtcIso } from '../utils/timeZone';
-import { WUSA_IMPORTED_EVENTS } from './wusaEventsData';
 import waterlooGooseAvatar from '../assets/images/waterloo_goose_avatar_1794962499830.jpg';
 
 export const formatPublicName = (fullName: string): string => {
@@ -255,25 +254,27 @@ export const CATEGORY_COLORS: Record<string, { bg: string; text: string; hex: st
   'Research participation': { bg: 'bg-orange-600', text: 'text-white', hex: '#EA580C' }
 };
 
-// WatHive event catalogue is strictly populated with real events scraped from WUSA (wusa.ca/events)
-export const INITIAL_EVENTS: EventItem[] = [...WUSA_IMPORTED_EVENTS];
+// WatHive event catalogue is dynamically populated from live backend (/api/collector/preview)
+export const INITIAL_EVENTS: EventItem[] = [];
 
 // Mapping of which sample attendees are going to which events (with openToMeeting: true)
 export const INITIAL_EVENT_ATTENDEES: Record<string, string[]> = {
-  'wusa_245612': ['maya_patel', 'priya_sharma'], // Mates Burnout & Balance Circle
-  'wusa_246355': ['marcus_zhao', 'liam_campbell'], // Bingeman's Screampark Trip with ICSN
-  'wusa_247699': ['chloe_tremblay', 'maya_patel'], // Winter Warm-Up
-  'wusa_244841': ['liam_campbell', 'marcus_zhao'], // Fruit & Veggie Market
+  'wusa_247403': ['maya_patel', 'marcus_zhao'], // Know Your Rights Before You Sign the Lease
+  'wusa_249666': ['chloe_tremblay', 'priya_sharma'], // Mates X Counselling Services Stress Workshop
+  'wusa_250173': ['maya_patel', 'chloe_tremblay', 'liam_campbell'], // Roshni Diwali Musical Celebration
+  'wusa_244843': ['liam_campbell', 'marcus_zhao'], // Fruit & Veggie Market (Nov 25)
+  'wusa_250216': ['chloe_tremblay', 'priya_sharma'], // Makeup Night at Glow Centre
   'wusa_246689': ['priya_sharma', 'chloe_tremblay'], // Accounting Conference
-  'wusa_247812': ['maya_patel', 'chloe_tremblay'], // UW Cooking Club
-  'wusa_246136': ['liam_campbell', 'priya_sharma'], // UW JamNetwork Album Concert
-  'wusa_248421': ['marcus_zhao', 'liam_campbell'], // UW Debate Chancellors Cup
-  'wusa_245501': ['maya_patel', 'marcus_zhao'], // Give a Bag, Get a Scoop
-  'wusa_248560': ['chloe_tremblay', 'priya_sharma'] // WUSA Thrift Sidewalk Sale
+  'wusa_249683': ['liam_campbell', 'marcus_zhao'], // Trivia Night @ The Bomber
+  'wusa_247753': ['maya_patel', 'chloe_tremblay'], // Winter Warm-Up Event (Dec 5)
+  'wusa_244717': ['marcus_zhao', 'liam_campbell'], // Lady Rev Classic Invitational
+  'wusa_245612': ['maya_patel', 'priya_sharma'],
+  'wusa_246355': ['marcus_zhao', 'liam_campbell'],
+  'wusa_244841': ['liam_campbell', 'marcus_zhao']
 };
 
-export const INITIAL_USER_ATTENDING = ['wusa_245612', 'wusa_244841', 'wusa_247699'];
-export const INITIAL_USER_SAVED = ['wusa_246355', 'wusa_246689', 'wusa_248421'];
+export const INITIAL_USER_ATTENDING = ['wusa_247403', 'wusa_244843'];
+export const INITIAL_USER_SAVED = ['wusa_250173', 'wusa_246689', 'wusa_249683'];
 // Buddy matching is strictly OFF by default per event. Users must explicitly preview and opt in.
 export const INITIAL_USER_VISIBILITY: Record<string, boolean> = {};
 
@@ -316,9 +317,7 @@ export const INITIAL_CONVERSATIONS: Conversation[] = [
     lastMessage: 'Awesome! Let us meet by the SLC Tim Hortons around 11:15am so we can grab fresh produce before the line gets long.',
     lastMessageTime: '11:42 AM',
     unreadCount: 0,
-    isBlocked: false,
     isReported: false,
-    isDisconnected: false,
     stayConnectedUser: false,
     stayConnectedPartner: false,
     isChatClosedPostEvent: false

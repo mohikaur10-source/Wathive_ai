@@ -13,6 +13,30 @@ export interface ParsedEventPageDetails {
   httpStatus?: number;
 }
 
+export function capString(value: string | null | undefined, maxLength: number): string {
+  if (!value) return '';
+  return value.length > maxLength ? value.slice(0, maxLength) : value;
+}
+
+export function sanitizeHttpUrl(
+  rawUrl: string | null | undefined,
+  maxLength = 2048
+): string | null {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.length > maxLength) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    const normalized = parsed.toString();
+    return normalized.length <= maxLength ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
 export function decodeHtmlEntities(str: string): string {
   if (!str) return '';
   return str
@@ -36,7 +60,10 @@ export function decodeHtmlEntities(str: string): string {
     .replace(/&#160;/g, ' ')
     .replace(/&#(\d+);/g, (_, dec) => {
       try {
-        return String.fromCharCode(parseInt(dec, 10));
+        const code = parseInt(dec, 10);
+        return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+          ? String.fromCodePoint(code)
+          : '';
       } catch {
         return '';
       }
@@ -45,8 +72,8 @@ export function decodeHtmlEntities(str: string): string {
 
 export function sanitizeHtml(html: string): string {
   if (!html) return '';
-  
-  // Strip dangerous tags: <script>, <style>, <iframe>, <object>, <embed>, <applet>
+
+  // Strip dangerous tags: <script>, <style>, <iframe>, <object>, <embed>
   let clean = html
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
     .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
@@ -66,14 +93,13 @@ export function sanitizeHtml(html: string): string {
 
 export function stripHtmlToText(html: string): string {
   if (!html) return '';
-  const decoded = decodeHtmlEntities(html);
-  return decoded
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+  const cleaned = sanitizeHtml(html);
+  const withBreaks = cleaned
     .replace(/<br\s*[\/]?>/gi, '\n')
     .replace(/<\/p>/gi, '\n\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
+    .replace(/<[^>]+>/g, '');
+  return decodeHtmlEntities(withBreaks)
+    .replace(/\u00a0/g, ' ')
     .replace(/\n\s*\n+/g, '\n\n')
     .trim();
 }
@@ -93,18 +119,21 @@ export function extractRegistrationLinks(htmlOrText: string): string | null {
   for (const pat of regPatterns) {
     const match = htmlOrText.match(pat);
     if (match && match[1]) {
-      const url = decodeHtmlEntities(match[1]);
-      // Avoid internal API endpoints like tribe/tickets/v1/
-      if (!url.includes('/wp-json/')) {
-        return url;
+      const candidate = decodeHtmlEntities(match[1]);
+      const safe = sanitizeHttpUrl(candidate);
+      if (safe && !safe.includes('/wp-json/')) {
+        return safe;
       }
     }
   }
 
   // Check for general RSVP links with registration keyword
   const generalMatch = htmlOrText.match(/href="([^"]+)"[^>]*>(?:RSVP|Register|Sign up|Buy Tickets|Get Tickets|Book Now|Waiver Form)/i);
-  if (generalMatch && generalMatch[1] && !generalMatch[1].startsWith('#') && !generalMatch[1].includes('/wp-json/')) {
-    return decodeHtmlEntities(generalMatch[1]);
+  if (generalMatch && generalMatch[1] && !generalMatch[1].startsWith('#')) {
+    const safe = sanitizeHttpUrl(decodeHtmlEntities(generalMatch[1]));
+    if (safe && !safe.includes('/wp-json/')) {
+      return safe;
+    }
   }
 
   return null;
@@ -129,7 +158,7 @@ export function parseEventHtmlPage(html: string, httpStatus = 200): ParsedEventP
 
   // Canonical URL
   const canonicalMatch = html.match(/<link\s+rel=["']canonical["']\s+href=["']([^"']+)["']/i);
-  const canonicalUrl = canonicalMatch ? canonicalMatch[1] : null;
+  const canonicalUrl = canonicalMatch ? sanitizeHttpUrl(canonicalMatch[1]) : null;
 
   // JSON-LD extraction
   let jsonLd: any = null;
@@ -147,7 +176,7 @@ export function parseEventHtmlPage(html: string, httpStatus = 200): ParsedEventP
           jsonLd = eventItem;
           break;
         }
-      } catch (err) {
+      } catch {
         // Continue looking for valid event JSON-LD
       }
     }
@@ -178,7 +207,7 @@ export function parseEventHtmlPage(html: string, httpStatus = 200): ParsedEventP
       offers.push({
         price: o.price !== undefined ? o.price : (o.lowPrice ? `${o.lowPrice} - ${o.highPrice}` : 'Unknown'),
         availability: o.availability ? String(o.availability).replace('https://schema.org/', '') : undefined,
-        url: o.url
+        url: sanitizeHttpUrl(o.url) || undefined
       });
     }
   }
@@ -193,7 +222,7 @@ export function parseEventHtmlPage(html: string, httpStatus = 200): ParsedEventP
   let registrationDeadline: string | null = null;
   const deadlineMatch = html.match(/(?:registration|rsvp|ticket)\s+(?:deadline|closes|ends|cut-off)(?:\s+is)?[:\s]+([^<\n.]{5,50})/i);
   if (deadlineMatch) {
-    registrationDeadline = deadlineMatch[1].trim();
+    registrationDeadline = capString(stripHtmlToText(deadlineMatch[1]), 200) || null;
   }
 
   return {

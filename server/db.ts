@@ -8,6 +8,8 @@ import {
   SyncRun,
   CollectorConfig
 } from './types.js';
+import { capString, sanitizeHttpUrl, stripHtmlToText } from './htmlParser.js';
+import { torontoWallClockToUtcMs } from '../src/utils/eventLifecycle.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(DATA_DIR)) {
@@ -20,8 +22,66 @@ export class CollectorDatabase {
   private db: DatabaseSync;
 
   constructor(dbPath = DB_PATH) {
-    this.db = new DatabaseSync(dbPath);
-    this.initSchema();
+    this.db = this.openWithRecovery(dbPath);
+  }
+
+  private isCorruptionError(err: unknown): boolean {
+    if (!err || typeof err !== 'object') return false;
+    const e = err as { code?: string; errcode?: number; errstr?: string; message?: string };
+    const msg = `${e.errstr || ''} ${e.message || ''}`.toLowerCase();
+    return (
+      e.errcode === 11 ||
+      e.errcode === 26 ||
+      msg.includes('malformed') ||
+      msg.includes('not a database') ||
+      msg.includes('quick_check')
+    );
+  }
+
+  private removeDbFiles(dbPath: string) {
+    for (const suffix of ['', '-wal', '-shm']) {
+      const file = `${dbPath}${suffix}`;
+      try {
+        if (fs.existsSync(file)) {
+          fs.unlinkSync(file);
+        }
+      } catch {
+        // ignore cleanup failure
+      }
+    }
+  }
+
+  private openWithRecovery(dbPath: string): DatabaseSync {
+    const attemptOpen = (): DatabaseSync => {
+      const database = new DatabaseSync(dbPath);
+      this.db = database;
+      if (dbPath !== ':memory:') {
+        const check = this.db.prepare('PRAGMA quick_check(1)').get() as
+          | { quick_check?: string }
+          | undefined;
+        if (check?.quick_check !== 'ok') {
+          throw new Error(`SQLite quick_check failed: ${check?.quick_check || 'unknown'}`);
+        }
+      }
+      this.initSchema();
+      return this.db;
+    };
+
+    try {
+      return attemptOpen();
+    } catch (err) {
+      if (dbPath !== ':memory:' && this.isCorruptionError(err)) {
+        console.warn('[CollectorDB] Corrupted SQLite cache detected; rebuilding fresh database.');
+        try {
+          this.db?.close();
+        } catch {
+          // ignore close failure
+        }
+        this.removeDbFiles(dbPath);
+        return attemptOpen();
+      }
+      throw err;
+    }
   }
 
   private initSchema() {
@@ -123,26 +183,190 @@ export class CollectorDatabase {
       );
     `);
 
-    // Ensure default config exists
+    // Safe migration: add `archived`, `start_utc`, `end_utc`, `source`, `source_url` columns if they do not exist yet
+    const cols = this.db.prepare('PRAGMA table_info(wusa_events)').all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'archived')) {
+      this.db.exec('ALTER TABLE wusa_events ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!cols.some(c => c.name === 'start_utc')) {
+      this.db.exec('ALTER TABLE wusa_events ADD COLUMN start_utc TEXT');
+    }
+    if (!cols.some(c => c.name === 'end_utc')) {
+      this.db.exec('ALTER TABLE wusa_events ADD COLUMN end_utc TEXT');
+    }
+    if (!cols.some(c => c.name === 'source')) {
+      this.db.exec("ALTER TABLE wusa_events ADD COLUMN source TEXT NOT NULL DEFAULT 'wusa'");
+    }
+    if (!cols.some(c => c.name === 'source_url')) {
+      this.db.exec('ALTER TABLE wusa_events ADD COLUMN source_url TEXT');
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_events_archived ON wusa_events(archived)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_events_end_utc ON wusa_events(end_utc)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_events_source ON wusa_events(source)');
+
+    // Ensure default config exists (hourly auto-sync enabled, past_days_scope forced to 0)
     const defaultConfigs: Record<string, string> = {
-      past_days_scope: '30',
+      past_days_scope: '0',
       future_days_scope: '180',
       daily_sync_time: '06:00',
-      frequency_mode: 'daily',
+      frequency_mode: 'hourly',
       page_limit: '20',
       request_delay_ms: '350',
       auto_sync_enabled: '1',
       detail_enrichment_enabled: '1'
     };
 
-    const checkStmt = this.db.prepare('SELECT key FROM collector_config WHERE key = ?');
+    const checkStmt = this.db.prepare('SELECT key, value FROM collector_config WHERE key = ?');
     const insertStmt = this.db.prepare('INSERT INTO collector_config (key, value) VALUES (?, ?)');
+    const updateFreqStmt = this.db.prepare("UPDATE collector_config SET value = 'hourly' WHERE key = 'frequency_mode' AND value = 'daily'");
+    const forcePastScopeStmt = this.db.prepare("INSERT OR REPLACE INTO collector_config (key, value) VALUES ('past_days_scope', '0')");
 
     for (const [k, v] of Object.entries(defaultConfigs)) {
       if (!checkStmt.get(k)) {
         insertStmt.run(k, v);
       }
     }
+    updateFreqStmt.run();
+    forcePastScopeStmt.run();
+
+    // Backfill start_utc / end_utc for existing rows missing UTC bounds
+    this.backfillUtcBounds();
+
+    // Archive past events on database initialization
+    this.archivePastEvents();
+  }
+
+  private computeUtcWindow(
+    startDate: string,
+    endDate: string | null,
+    startIso?: string | null,
+    endIso?: string | null
+  ): { startUtc: string; endUtc: string } {
+    let startMs = startIso ? Date.parse(startIso) : NaN;
+    if (Number.isNaN(startMs) && startDate) {
+      const datePart = startDate.slice(0, 10);
+      const timePart = startDate.slice(11, 19) || '00:00:00';
+      startMs = torontoWallClockToUtcMs(datePart, timePart);
+    }
+    const startUtc = Number.isFinite(startMs) ? new Date(startMs).toISOString() : new Date().toISOString();
+
+    let endMs = endIso ? Date.parse(endIso) : NaN;
+    if (Number.isNaN(endMs)) {
+      const rawEnd = endDate && endDate.trim() ? endDate : '';
+      const endDatePart = rawEnd ? rawEnd.slice(0, 10) : startDate.slice(0, 10);
+      const endTimePart = rawEnd && rawEnd.length >= 16 ? rawEnd.slice(11, 19) || '23:59:59' : '23:59:59';
+      const msPad = endTimePart.startsWith('23:59:59') ? 999 : 0;
+      endMs = torontoWallClockToUtcMs(endDatePart, endTimePart, msPad);
+    } else if (endDate && endDate.includes('23:59:59') && endMs % 1000 === 0) {
+      endMs += 999;
+    }
+
+    const endUtc = Number.isFinite(endMs)
+      ? new Date(endMs).toISOString()
+      : new Date(torontoWallClockToUtcMs(startDate.slice(0, 10), '23:59:59', 999)).toISOString();
+
+    return { startUtc, endUtc };
+  }
+
+  private backfillUtcBounds() {
+    const missingRows = this.db
+      .prepare('SELECT id, start_date, end_date, start_iso, end_iso FROM wusa_events WHERE start_utc IS NULL OR end_utc IS NULL')
+      .all() as Array<{
+        id: string;
+        start_date: string;
+        end_date: string | null;
+        start_iso: string;
+        end_iso: string | null;
+      }>;
+
+    if (missingRows.length === 0) return;
+
+    const stmt = this.db.prepare('UPDATE wusa_events SET start_utc = ?, end_utc = ? WHERE id = ?');
+    for (const row of missingRows) {
+      const { startUtc, endUtc } = this.computeUtcWindow(row.start_date, row.end_date, row.start_iso, row.end_iso);
+      stmt.run(startUtc, endUtc, row.id);
+    }
+  }
+
+  public getTorontoDateTimeNow(now: Date = new Date()): { dateStr: string; timeStr: string; dateTimeStr: string } {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Toronto',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    });
+    const parts = formatter.formatToParts(now);
+    const getPart = (t: string) => parts.find(p => p.type === t)?.value || '00';
+    const dateStr = `${getPart('year')}-${getPart('month')}-${getPart('day')}`;
+    const timeStr = `${String(parseInt(getPart('hour'), 10) % 24).padStart(2, '0')}:${getPart('minute')}`;
+    return { dateStr, timeStr, dateTimeStr: `${dateStr} ${timeStr}` };
+  }
+
+  /**
+   * Automatically archives events whose end date/time is strictly before current time in America/Toronto.
+   */
+  public archivePastEvents(): number {
+    const nowMs = Date.now();
+    const rows = this.db
+      .prepare('SELECT id, start_date, end_date, start_iso, end_iso, start_utc, end_utc, archived, temporal_status FROM wusa_events')
+      .all() as Array<{
+        id: string;
+        start_date: string;
+        end_date: string | null;
+        start_iso: string;
+        end_iso: string | null;
+        start_utc: string | null;
+        end_utc: string | null;
+        archived: number;
+        temporal_status: string;
+      }>;
+
+    const archiveStmt = this.db.prepare("UPDATE wusa_events SET archived = 1, temporal_status = 'past' WHERE id = ?");
+    const unarchiveStmt = this.db.prepare('UPDATE wusa_events SET archived = 0 WHERE id = ?');
+
+    let archivedCount = 0;
+    for (const row of rows) {
+      const effectiveEndUtc =
+        row.end_utc ||
+        this.computeUtcWindow(row.start_date, row.end_date, row.start_iso, row.end_iso).endUtc;
+      const endMs = Date.parse(effectiveEndUtc);
+      const isPast = Number.isNaN(endMs) ? true : endMs <= nowMs;
+
+      if (isPast && (row.archived !== 1 || row.temporal_status !== 'past')) {
+        archiveStmt.run(row.id);
+        archivedCount++;
+      } else if (!isPast && row.archived === 1 && row.temporal_status === 'past') {
+        unarchiveStmt.run(row.id);
+      }
+    }
+    return archivedCount;
+  }
+
+  /**
+   * Archives community events belonging to a specific source + feed URL that disappeared from the latest successful fetch.
+   */
+  public archiveMissingEventsForSource(
+    source: 'community_sheet' | 'community_ics',
+    sourceUrl: string,
+    activeIds: string[]
+  ): number {
+    const activeSet = new Set(activeIds);
+    const rows = this.db
+      .prepare('SELECT id FROM wusa_events WHERE source = ? AND source_url = ? AND archived = 0')
+      .all(source, sourceUrl) as Array<{ id: string }>;
+
+    const stmt = this.db.prepare('UPDATE wusa_events SET archived = 1 WHERE id = ?');
+    let count = 0;
+    for (const row of rows) {
+      if (!activeSet.has(row.id)) {
+        stmt.run(row.id);
+        count++;
+      }
+    }
+    return count;
   }
 
   // --- CONFIG ---
@@ -152,10 +376,10 @@ export class CollectorDatabase {
     const map = new Map(rows.map(r => [r.key, r.value]));
 
     return {
-      past_days_scope: parseInt(map.get('past_days_scope') || '30', 10),
+      past_days_scope: parseInt(map.get('past_days_scope') || '0', 10),
       future_days_scope: parseInt(map.get('future_days_scope') || '180', 10),
       daily_sync_time: map.get('daily_sync_time') || '06:00',
-      frequency_mode: (map.get('frequency_mode') as any) || 'daily',
+      frequency_mode: (map.get('frequency_mode') as any) || 'hourly',
       page_limit: parseInt(map.get('page_limit') || '20', 10),
       request_delay_ms: parseInt(map.get('request_delay_ms') || '350', 10),
       auto_sync_enabled: map.get('auto_sync_enabled') === '1',
@@ -187,8 +411,21 @@ export class CollectorDatabase {
     return row ? this.mapRowToEvent(row) : null;
   }
 
-  public getAllEventsRaw(): WusaStoredEvent[] {
-    const rows = this.db.prepare('SELECT * FROM wusa_events ORDER BY start_date ASC').all() as any[];
+  public findEventByUrl(url: string): WusaStoredEvent | null {
+    const row = this.db.prepare('SELECT * FROM wusa_events WHERE original_wusa_url = ? LIMIT 1').get(url) as any;
+    return row ? this.mapRowToEvent(row) : null;
+  }
+
+  public getAllEventsRaw(includeArchived = false): WusaStoredEvent[] {
+    this.archivePastEvents();
+    if (includeArchived) {
+      const rows = this.db.prepare('SELECT * FROM wusa_events ORDER BY COALESCE(start_utc, start_iso, start_date) ASC').all() as any[];
+      return rows.map(r => this.mapRowToEvent(r));
+    }
+    const nowUtcIso = new Date().toISOString();
+    const rows = this.db
+      .prepare("SELECT * FROM wusa_events WHERE archived = 0 AND approval_status != 'rejected' AND (source = 'wusa' OR approval_status = 'approved') AND (end_utc IS NULL OR end_utc > ?) ORDER BY COALESCE(start_utc, start_iso, start_date) ASC")
+      .all(nowUtcIso) as any[];
     return rows.map(r => this.mapRowToEvent(r));
   }
 
@@ -202,11 +439,12 @@ export class CollectorDatabase {
     page?: number;
     limit?: number;
   }): { events: WusaStoredEvent[]; total: number; page: number; limit: number } {
+    this.archivePastEvents();
     const page = filters.page || 1;
     const limit = filters.limit || 50;
     const offset = (page - 1) * limit;
 
-    let whereClauses: string[] = [];
+    let whereClauses: string[] = ['archived = 0'];
     let params: any[] = [];
 
     if (filters.search) {
@@ -221,7 +459,7 @@ export class CollectorDatabase {
     }
 
     if (filters.status === 'cancelled') {
-      whereClauses.push('cancellation_status = "cancelled"');
+      whereClauses.push("cancellation_status = 'cancelled'");
     }
 
     if (filters.category && filters.category !== 'all') {
@@ -274,59 +512,82 @@ export class CollectorDatabase {
     syncRunId: string
   ): { status: 'new' | 'updated' | 'unchanged' | 'failed'; diffCount: number } {
     try {
-      const existing = this.getStoredEvent(event.id) || this.findEventByUrlAndDate(event.original_wusa_url, event.start_date);
+      const eventSource: 'wusa' | 'community_sheet' | 'community_ics' = event.source || 'wusa';
+      const isCommunity = eventSource !== 'wusa';
+
+      const existing = isCommunity
+        ? this.getStoredEvent(event.id)
+        : (
+            this.getStoredEvent(event.id) ||
+            this.findEventByUrlAndDate(event.original_wusa_url, event.start_date) ||
+            this.findEventByUrl(event.original_wusa_url)
+          );
       const now = new Date().toISOString();
+
+      const utcBounds = this.computeUtcWindow(event.start_date, event.end_date, event.start_iso, event.end_iso);
+      const startUtc = event.start_utc || utcBounds.startUtc;
+      const endUtc = event.end_utc || utcBounds.endUtc;
 
       if (!existing) {
         // Brand new event
         const insertStmt = this.db.prepare(`
           INSERT INTO wusa_events (
             id, title, slug, description, description_text, excerpt,
-            organizer_json, start_date, end_date, start_iso, end_iso, timezone, all_day,
+            organizer_json, start_date, end_date, start_iso, end_iso, start_utc, end_utc, timezone, all_day,
             venue_json, category, categories_json, cost, registration_url, registration_deadline,
-            source_image_url, original_wusa_url, cancellation_status, temporal_status,
+            source, source_url, source_image_url, original_wusa_url, cancellation_status, temporal_status, archived,
             is_multi_day, is_recurring, series_id, recurrence_rule,
             review_status, review_flags_json, approval_status, admin_notes,
             content_hash, first_imported_at, last_checked_at, last_changed_at, raw_payload
           ) VALUES (
             ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?, ?
           )
         `);
 
+        const safeTitle = capString(event.title, 300);
+        const safeDescText = capString(stripHtmlToText(event.description_text || event.description || ''), 10_000);
+        const safeExcerpt = event.excerpt ? capString(stripHtmlToText(event.excerpt), 1000) : null;
+        const safeOriginalUrl = sanitizeHttpUrl(event.original_wusa_url) || (isCommunity ? '' : `https://wusa.ca/event/${encodeURIComponent(event.id)}/`);
+
         insertStmt.run(
-          event.id,
-          event.title,
-          event.slug,
-          event.description,
-          event.description_text,
-          event.excerpt,
+          capString(event.id, 64),
+          safeTitle,
+          event.slug ? capString(event.slug, 200) : null,
+          safeDescText,
+          safeDescText,
+          safeExcerpt,
           event.organizer ? JSON.stringify(event.organizer) : null,
           event.start_date,
           event.end_date,
           event.start_iso,
           event.end_iso,
+          startUtc,
+          endUtc,
           event.timezone,
           event.all_day ? 1 : 0,
           event.venue ? JSON.stringify(event.venue) : null,
-          event.category,
+          capString(event.category, 100),
           JSON.stringify(event.categories || []),
-          event.cost,
-          event.registration_url,
-          event.registration_deadline,
-          event.source_image_url,
-          event.original_wusa_url,
+          event.cost ? capString(event.cost, 120) : null,
+          sanitizeHttpUrl(event.registration_url),
+          event.registration_deadline ? capString(event.registration_deadline, 200) : null,
+          eventSource,
+          event.source_url || null,
+          sanitizeHttpUrl(event.source_image_url),
+          safeOriginalUrl,
           event.cancellation_status,
           event.temporal_status,
+          event.temporal_status === 'past' ? 1 : 0,
           event.is_multi_day ? 1 : 0,
           event.is_recurring ? 1 : 0,
           event.series_id,
-          event.recurrence_rule,
+          event.recurrence_rule ? capString(event.recurrence_rule, 1000) : null,
           event.review_status,
           JSON.stringify(event.review_flags || []),
           event.approval_status || 'pending',
@@ -335,7 +596,7 @@ export class CollectorDatabase {
           now, // first_imported_at
           now, // last_checked_at
           now, // last_changed_at
-          event.raw_payload || null
+          null
         );
 
         return { status: 'new', diffCount: 0 };
@@ -344,10 +605,9 @@ export class CollectorDatabase {
       // Existing event: Check for meaningful field changes
       const diffs: Array<{ field: string; oldVal: string | null; newVal: string | null }> = [];
 
-      // Check fields for updates - with protection against empty overwrites
+      // Check fields for updates - for WUSA keep non-empty guard against scrape glitches; for community sources treat feed row as authoritative
       const checkField = (field: string, oldVal: any, newVal: any) => {
-        // Rule: Do NOT overwrite valid stored fields with empty values caused by extraction failures
-        if (oldVal && (newVal === null || newVal === undefined || newVal === '')) {
+        if (!isCommunity && oldVal && (newVal === null || newVal === undefined || newVal === '')) {
           return; // preserve existing valid value
         }
 
@@ -360,10 +620,13 @@ export class CollectorDatabase {
       };
 
       checkField('title', existing.title, event.title);
+      checkField('description_text', existing.description_text, event.description_text);
+      checkField('category', existing.category, event.category);
       checkField('start_date', existing.start_date, event.start_date);
       checkField('end_date', existing.end_date, event.end_date);
       checkField('start_iso', existing.start_iso, event.start_iso);
       checkField('end_iso', existing.end_iso, event.end_iso);
+      checkField('all_day', existing.all_day, event.all_day);
       checkField('cost', existing.cost, event.cost);
       checkField('venue', existing.venue, event.venue);
       checkField('organizer', existing.organizer, event.organizer);
@@ -371,9 +634,13 @@ export class CollectorDatabase {
       checkField('registration_deadline', existing.registration_deadline, event.registration_deadline);
       checkField('cancellation_status', existing.cancellation_status, event.cancellation_status);
       checkField('source_image_url', existing.source_image_url, event.source_image_url);
+      if (isCommunity) {
+        checkField('approval_status', existing.approval_status, event.approval_status);
+        checkField('source_url', existing.source_url, event.source_url);
+      }
 
-      // Preserve existing manual approval or notes if admin made them
-      const approvalStatus = existing.approval_status;
+      // Preserve existing manual approval or notes for WUSA; sync approval for community rows
+      const approvalStatus = isCommunity ? (event.approval_status || existing.approval_status) : existing.approval_status;
       const adminNotes = existing.admin_notes;
 
       // Merge review flags so manual or previously flagged issues are retained
@@ -381,12 +648,12 @@ export class CollectorDatabase {
       const reviewStatus = mergedFlags.length > 0 ? 'needs_review' : 'clean';
 
       if (diffs.length === 0) {
-        // Unchanged: update last_checked_at and refreshed temporal status
+        // Unchanged: update last_checked_at, refreshed temporal status, UTC bounds, and archived state
         this.db.prepare(`
           UPDATE wusa_events 
-          SET last_checked_at = ?, temporal_status = ? 
+          SET last_checked_at = ?, temporal_status = ?, archived = ?, start_utc = ?, end_utc = ? 
           WHERE id = ?
-        `).run(now, event.temporal_status, existing.id);
+        `).run(now, event.temporal_status, event.temporal_status === 'past' ? 1 : 0, startUtc, endUtc, existing.id);
 
         return { status: 'unchanged', diffCount: 0 };
       }
@@ -413,6 +680,8 @@ export class CollectorDatabase {
           end_date = ?,
           start_iso = ?,
           end_iso = ?,
+          start_utc = ?,
+          end_utc = ?,
           timezone = ?,
           all_day = ?,
           venue_json = ?,
@@ -421,10 +690,13 @@ export class CollectorDatabase {
           cost = ?,
           registration_url = ?,
           registration_deadline = ?,
+          source = ?,
+          source_url = ?,
           source_image_url = ?,
           original_wusa_url = ?,
           cancellation_status = ?,
           temporal_status = ?,
+          archived = ?,
           is_multi_day = ?,
           is_recurring = ?,
           series_id = ?,
@@ -440,32 +712,54 @@ export class CollectorDatabase {
         WHERE id = ?
       `);
 
+      const safeUpdDesc = capString(
+        stripHtmlToText(
+          isCommunity
+            ? (event.description_text || event.description || '')
+            : (event.description_text || event.description || existing.description_text || existing.description || '')
+        ),
+        10_000
+      );
+
       updateStmt.run(
-        event.title || existing.title,
-        event.description || existing.description,
-        event.description_text || existing.description_text,
-        event.excerpt || existing.excerpt,
-        event.organizer ? JSON.stringify(event.organizer) : (existing.organizer ? JSON.stringify(existing.organizer) : null),
+        capString(event.title || existing.title, 300),
+        safeUpdDesc,
+        safeUpdDesc,
+        isCommunity
+          ? (event.excerpt ? capString(stripHtmlToText(event.excerpt), 1000) : null)
+          : ((event.excerpt || existing.excerpt) ? capString(stripHtmlToText(event.excerpt || existing.excerpt || ''), 1000) : null),
+        event.organizer ? JSON.stringify(event.organizer) : (isCommunity ? null : (existing.organizer ? JSON.stringify(existing.organizer) : null)),
         event.start_date || existing.start_date,
-        event.end_date || existing.end_date,
+        isCommunity ? event.end_date : (event.end_date || existing.end_date),
         event.start_iso || existing.start_iso,
-        event.end_iso || existing.end_iso,
+        isCommunity ? event.end_iso : (event.end_iso || existing.end_iso),
+        startUtc,
+        endUtc,
         event.timezone || existing.timezone,
         event.all_day ? 1 : 0,
-        event.venue ? JSON.stringify(event.venue) : (existing.venue ? JSON.stringify(existing.venue) : null),
-        event.category || existing.category,
+        event.venue ? JSON.stringify(event.venue) : (isCommunity ? null : (existing.venue ? JSON.stringify(existing.venue) : null)),
+        capString(event.category || existing.category, 100),
         JSON.stringify(event.categories || existing.categories || []),
-        event.cost || existing.cost,
-        event.registration_url || existing.registration_url,
-        event.registration_deadline || existing.registration_deadline,
-        event.source_image_url || existing.source_image_url,
-        event.original_wusa_url || existing.original_wusa_url,
+        isCommunity
+          ? (event.cost ? capString(event.cost, 120) : null)
+          : ((event.cost || existing.cost) ? capString(event.cost || existing.cost || '', 120) : null),
+        isCommunity ? sanitizeHttpUrl(event.registration_url) : sanitizeHttpUrl(event.registration_url || existing.registration_url),
+        isCommunity
+          ? (event.registration_deadline ? capString(event.registration_deadline, 200) : null)
+          : ((event.registration_deadline || existing.registration_deadline) ? capString(event.registration_deadline || existing.registration_deadline || '', 200) : null),
+        eventSource,
+        event.source_url ?? existing.source_url ?? null,
+        isCommunity ? sanitizeHttpUrl(event.source_image_url) : sanitizeHttpUrl(event.source_image_url || existing.source_image_url),
+        isCommunity
+          ? (sanitizeHttpUrl(event.original_wusa_url) || '')
+          : (sanitizeHttpUrl(event.original_wusa_url || existing.original_wusa_url) || existing.original_wusa_url),
         event.cancellation_status || existing.cancellation_status,
         event.temporal_status,
+        event.temporal_status === 'past' ? 1 : 0,
         event.is_multi_day ? 1 : 0,
         event.is_recurring ? 1 : 0,
         event.series_id || existing.series_id,
-        event.recurrence_rule || existing.recurrence_rule,
+        (event.recurrence_rule || existing.recurrence_rule) ? capString(event.recurrence_rule || existing.recurrence_rule || '', 1000) : null,
         reviewStatus,
         JSON.stringify(mergedFlags),
         approvalStatus,
@@ -473,7 +767,7 @@ export class CollectorDatabase {
         event.content_hash,
         now, // last_checked_at
         now, // last_changed_at
-        event.raw_payload || existing.raw_payload || null,
+        null,
         existing.id
       );
 
@@ -762,6 +1056,8 @@ export class CollectorDatabase {
       end_date: r.end_date,
       start_iso: r.start_iso,
       end_iso: r.end_iso,
+      start_utc: r.start_utc ?? null,
+      end_utc: r.end_utc ?? null,
       timezone: r.timezone,
       all_day: Boolean(r.all_day),
       venue: r.venue_json ? JSON.parse(r.venue_json) : null,
@@ -770,6 +1066,8 @@ export class CollectorDatabase {
       cost: r.cost,
       registration_url: r.registration_url,
       registration_deadline: r.registration_deadline,
+      source: (r.source as 'wusa' | 'community_sheet' | 'community_ics') || 'wusa',
+      source_url: r.source_url ?? null,
       source_image_url: r.source_image_url,
       original_wusa_url: r.original_wusa_url,
       cancellation_status: r.cancellation_status,

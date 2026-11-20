@@ -52,11 +52,11 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
   const remainingDaily = Math.max(0, maxDailyRequests - dailyBuddyRequestsCount);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-900/60 backdrop-blur-xs overflow-y-auto">
-      <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-stone-100 relative my-auto animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
+      <div className="bg-surface text-ink rounded-3xl max-w-md w-full p-6 shadow-lift border border-line relative my-auto animate-in fade-in zoom-in-95 duration-150">
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 p-2 text-stone-400 hover:text-stone-700 rounded-full hover:bg-stone-100 transition-colors"
+          className="absolute top-4 right-4 p-2 text-muted hover:text-ink rounded-full hover:bg-surface-soft transition-colors cursor-pointer"
           aria-label="Close"
         >
           <X className="w-5 h-5" />
@@ -64,51 +64,51 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
 
         <div className="space-y-4">
           <div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-amber-800">Event Buddy Request</span>
+            <div className="flex items-center justify-between pr-8">
+              <span className="text-xs font-bold text-accent-text">Event Buddy Request</span>
               <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
-                remainingDaily > 0 ? 'bg-stone-100 text-stone-700' : 'bg-red-100 text-red-800'
+                remainingDaily > 0 ? 'bg-surface-soft text-muted' : 'bg-danger-soft text-danger'
               }`}>
                 {remainingDaily} of {maxDailyRequests} daily requests left
               </span>
             </div>
-            <h3 className="text-lg font-bold text-stone-950 mt-0.5">
+            <h3 className="text-lg font-bold text-ink mt-0.5">
               Want to go together?
             </h3>
-            <p className="text-xs text-stone-600">
-              For <span className="font-semibold text-stone-900">{event.title}</span>
+            <p className="text-xs text-muted">
+              For <span className="font-semibold text-ink">{event.title}</span>
             </p>
           </div>
 
           {/* Attendee Profile Preview Card with Compatibility Breakdown */}
-          <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200/90 space-y-2.5">
+          <div className="p-4 bg-surface-soft/50 rounded-2xl border border-line space-y-2.5">
             <div className="flex items-start gap-3">
               <img
                 src={attendee.avatar}
                 alt={attendee.name}
                 referrerPolicy="no-referrer"
-                className="w-12 h-12 rounded-full object-cover border-2 border-amber-400 shrink-0"
+                className="w-12 h-12 rounded-full object-cover border-2 border-accent shrink-0"
               />
               <div className="min-w-0 flex-1 space-y-0.5">
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <h4 className="font-bold text-stone-950 text-sm">{attendee.name}</h4>
-                  <span className="text-[10px] bg-stone-950 text-amber-300 font-bold px-1.5 py-0.5 rounded-md flex items-center gap-1">
-                    <Shield className="w-2.5 h-2.5 text-amber-400" />
+                  <h4 className="font-bold text-ink text-sm">{attendee.name}</h4>
+                  <span className="text-[10px] bg-accent-soft text-accent-text border border-accent/30 font-bold px-1.5 py-0.5 rounded-md flex items-center gap-1">
+                    <Shield className="w-2.5 h-2.5" />
                     Verified @uwaterloo.ca
                   </span>
                 </div>
                 {(attendee.faculty || attendee.year) && (
-                  <div className="text-xs text-stone-600 flex items-center gap-1.5 flex-wrap">
+                  <div className="text-xs text-muted flex items-center gap-1.5 flex-wrap">
                     {attendee.faculty && (
                       <span>{attendee.faculty} {attendee.program ? `· ${attendee.program}` : ''}</span>
                     )}
                     {attendee.year && (
-                      <span className="text-stone-400">({attendee.year})</span>
+                      <span className="text-muted">({attendee.year})</span>
                     )}
                   </div>
                 )}
                 {attendee.bio && (
-                  <p className="text-[11px] text-stone-600 italic pt-0.5 line-clamp-2">
+                  <p className="text-[11px] text-muted italic pt-0.5 line-clamp-2">
                     &ldquo;{attendee.bio}&rdquo;
                   </p>
                 )}
@@ -117,12 +117,12 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
 
             {/* Compatibility Badge if personality quiz is present */}
             {user?.personalityQuiz && attendee.personalityQuiz && (
-              <div className="pt-2 border-t border-stone-200 flex items-center justify-between text-xs">
-                <div className="flex items-center gap-1.5 font-bold text-amber-900">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Personality & Interest Match</span>
+              <div className="pt-2 border-t border-line flex items-center justify-between text-xs">
+                <div className="flex items-center gap-1.5 font-bold text-accent-text">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Personality &amp; Interest Match</span>
                 </div>
-                <span className="px-2 py-0.5 rounded-full bg-amber-400 text-stone-950 font-black text-[11px] shadow-2xs">
+                <span className="px-2 py-0.5 rounded-full bg-accent text-accent-ink font-black text-[11px] shadow-2xs">
                   High Compatibility
                 </span>
               </div>
@@ -130,7 +130,7 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
           </div>
 
           {error && (
-            <div className="p-3 bg-red-50 text-red-700 text-xs rounded-xl border border-red-200 flex items-start gap-2">
+            <div className="p-3 bg-danger-soft text-danger text-xs rounded-xl border border-danger/30 flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
               <span>{error}</span>
             </div>
@@ -139,23 +139,23 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
           <form onSubmit={handleSubmit} className="space-y-3">
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="block text-xs font-semibold text-stone-700">
+                <label className="block text-xs font-semibold text-ink">
                   Optional Short Introduction / Meeting Spot
                 </label>
-                <span className="text-[10px] text-stone-500 font-medium">Public spots recommended</span>
+                <span className="text-[10px] text-muted font-medium">Public spots recommended</span>
               </div>
               <textarea
                 rows={2}
                 value={introMessage}
                 onChange={(e) => setIntroMessage(e.target.value)}
                 placeholder="Say hello and suggest where to meet..."
-                className="w-full px-3.5 py-2.5 rounded-xl border border-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500 text-xs text-stone-900 resize-none"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-line bg-canvas text-ink placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent text-xs resize-none"
               />
             </div>
 
-            {/* Requirement 6: Encourage public meeting locations with starters */}
+            {/* Encourage public meeting locations with starters */}
             <div className="space-y-1.5">
-              <span className="text-[11px] font-bold text-stone-600 block">
+              <span className="text-[11px] font-bold text-muted block">
                 Public meeting spot suggestions:
               </span>
               <div className="flex flex-wrap gap-1.5">
@@ -164,7 +164,7 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
                     key={suggestion}
                     type="button"
                     onClick={() => setIntroMessage(suggestion)}
-                    className="text-[11px] px-2.5 py-1 rounded-lg bg-stone-100 hover:bg-amber-100 hover:text-stone-950 text-stone-700 font-medium transition-colors text-left"
+                    className="text-[11px] px-2.5 py-1 rounded-lg bg-surface-soft hover:bg-accent-soft text-ink font-medium transition-colors text-left cursor-pointer"
                   >
                     &ldquo;{suggestion}&rdquo;
                   </button>
@@ -172,34 +172,34 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
               </div>
             </div>
 
-            {/* Requirement 6: Safety reminder */}
-            <div className="p-3 bg-stone-50 rounded-xl text-[11px] text-stone-600 space-y-1 border border-stone-200/60">
-              <div className="flex items-center gap-1.5 text-stone-900 font-bold">
-                <Shield className="w-3.5 h-3.5 text-amber-600" />
+            {/* Safety reminder */}
+            <div className="p-3 bg-surface-soft/50 rounded-xl text-[11px] text-muted space-y-1 border border-line">
+              <div className="flex items-center gap-1.5 text-ink font-bold">
+                <Shield className="w-3.5 h-3.5 text-accent-text" />
                 <span>Safety Reminder</span>
               </div>
               <p>
                 &ldquo;You choose what to share. You can leave or block a conversation at any time.&rdquo;
               </p>
-              <p className="text-[10px] text-stone-500">
+              <p className="text-[10px] text-muted">
                 Live location is never shared. Always meet at a well-lit public spot like the event entrance or check-in desk.
               </p>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-stone-100">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-line">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2.5 text-xs font-semibold text-stone-600 hover:text-stone-900 rounded-xl"
+                className="px-4 py-2.5 text-xs font-semibold text-muted hover:text-ink rounded-xl cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={isSubmitting || remainingDaily <= 0}
-                className="px-5 py-2.5 bg-stone-950 hover:bg-black disabled:opacity-50 text-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all border border-stone-800"
+                className="px-5 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-soft transition-all cursor-pointer"
               >
-                <Send className="w-3.5 h-3.5 text-amber-400" />
+                <Send className="w-3.5 h-3.5" />
                 <span>{isSubmitting ? 'Sending...' : 'Want to go together?'}</span>
               </button>
             </div>

@@ -41,6 +41,8 @@ export interface WusaStoredEvent {
   end_date: string | null; // "2026-11-09 18:00:00" or ISO
   start_iso: string; // Full ISO 8601 with offset
   end_iso: string | null;
+  start_utc?: string | null; // Canonical UTC ISO-8601
+  end_utc?: string | null;   // Canonical UTC ISO-8601
   timezone: string; // "America/Toronto"
   all_day: boolean;
   
@@ -56,7 +58,9 @@ export interface WusaStoredEvent {
   registration_url: string | null;
   registration_deadline: string | null;
   
-  // Media & Links
+  // Media & Links & Source
+  source?: 'wusa' | 'community_sheet' | 'community_ics';
+  source_url?: string | null;
   source_image_url: string | null;
   original_wusa_url: string;
   
@@ -125,7 +129,7 @@ export interface SyncRun {
 }
 
 export interface CollectorConfig {
-  past_days_scope: number; // default: 30
+  past_days_scope: number; // default: 0
   future_days_scope: number; // default: 180
   daily_sync_time: string; // default: "06:00" America/Toronto
   frequency_mode: 'daily' | 'hourly' | 'every_6h' | 'every_12h';

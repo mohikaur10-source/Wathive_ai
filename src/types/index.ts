@@ -169,6 +169,7 @@ export interface EventItem {
   moderationStatus?: 'approved' | 'flagged' | 'pending_review' | 'rejected';
   isExternalConfirmedTicket?: boolean; // Avoids presenting unverified tickets as confirmed
   utcIsoString?: string; // Standardized UTC ISO-8601 storage
+  endUtcIso?: string;
   createdAt: string;
   _wusaMeta?: {
     sourceEventId?: string;
@@ -222,6 +223,15 @@ export interface ChatMessage {
   timestamp: string;
 }
 
+export type RemovedChatReason = 'left' | 'blocked' | 'reported';
+
+export interface RemovedChatRecord {
+  partnerId: string;
+  eventId: string | null;
+  reason: RemovedChatReason;
+  removedAt: string;
+}
+
 export interface Conversation {
   id: string;
   eventId: string;
@@ -232,9 +242,7 @@ export interface Conversation {
   lastMessage: string;
   lastMessageTime: string;
   unreadCount: number;
-  isBlocked?: boolean;
   isReported?: boolean;
-  isDisconnected?: boolean;
   stayConnectedUser?: boolean; // User choice post-event
   stayConnectedPartner?: boolean; // Partner choice post-event
   isChatClosedPostEvent?: boolean; // Closed if 48h passed without mutual choice

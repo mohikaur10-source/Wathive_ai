@@ -18,7 +18,9 @@ import {
   DuplicateDetectionResult,
   SyncCycleReport,
   StudentDiscount,
-  AdminAuditLog
+  AdminAuditLog,
+  RemovedChatReason,
+  RemovedChatRecord
 } from '../types';
 import {
   INITIAL_USER,
@@ -42,7 +44,18 @@ import {
 } from '../data/mockData';
 import { calculateCompatibility, DEFAULT_ALEX_QUIZ } from '../utils/compatibilityEngine';
 import { runTwoHourRefreshCycle, detectDuplicateEvents } from '../utils/eventAggregationEngine';
-import { toWaterlooUtcIso } from '../utils/timeZone';
+import { toWaterlooUtcIso, getTorontoNow, TorontoNowInfo } from '../utils/timeZone';
+import { isEventPast } from '../utils/eventLifecycle';
+import {
+  ChatStateSnapshot,
+  RemoveConversationsParams,
+  applyRemoveConversations,
+  applyUnblockUser,
+  getRequestRejectionForRemovedChat,
+  isChatRemovedForPair,
+  isPartnerBlockedOrReported,
+  sanitizeChatSnapshot
+} from '../utils/chatRemoval';
 
 export interface BuddyPrivacySettings {
   showFaculty: boolean;
@@ -60,6 +73,7 @@ interface AppContextType {
   isLoggedIn: boolean;
   onboardingStep: 1 | 2 | 3 | null;
   events: EventItem[];
+  upcomingEvents: EventItem[];
   savedEventIds: string[];
   attendingEventIds: string[];
   attendeeVisibility: Record<string, boolean>; // eventId -> buddy matching enabled (default false)
@@ -68,6 +82,7 @@ interface AppContextType {
   conversations: Conversation[];
   chatMessages: Record<string, ChatMessage[]>;
   blockedUserIds: string[];
+  removedChats: RemovedChatRecord[];
   reportedUserIds: string[];
   reportedEventIds: string[];
   reportsList: ReportSubmission[];
@@ -94,11 +109,10 @@ interface AppContextType {
   respondConnectionRequest: (requestId: string, action: 'accept' | 'decline') => void;
   withdrawConnectionRequest: (requestId: string) => void;
   sendMessage: (conversationId: string, text: string) => void;
-  disconnectConversation: (conversationId: string) => void;
+  removeConversations: (params: { partnerId: string; eventId?: string; reason: RemovedChatReason }) => void;
   toggleStayConnected: (conversationId: string) => void;
   simulatePartnerStayConnected: (conversationId: string) => void;
   toggleChatPostEventClosed: (conversationId: string) => void;
-  toggleSimulateEventEnded: (eventId: string) => void;
   blockUser: (userId: string) => void;
   unblockUser: (userId: string) => void;
   reportItem: (
@@ -112,7 +126,6 @@ interface AppContextType {
   updateEvent: (eventId: string, updatedData: Partial<EventItem>) => void;
   cancelEvent: (eventId: string) => void;
   resetDemoData: () => void;
-  rankForYouEvents: (eventsList: EventItem[]) => EventItem[];
   notificationSettings: NotificationSettings;
   updateNotificationSettings: (settings: NotificationSettings) => void;
   notifications: InAppNotification[];
@@ -135,22 +148,44 @@ interface AppContextType {
   addCustomDiscount: (discount: Omit<StudentDiscount, 'id' | 'verifiedAt'>) => void;
 }
 
-const STORAGE_KEY = 'wathive_app_state_v14';
+const STORAGE_KEY = 'wathive_app_state_v16';
 const MAX_DAILY_REQUESTS = 5;
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+const stripLegacyConversationFlags = (convs: any[]): Conversation[] =>
+  convs.map(({ isBlocked: _b, isDisconnected: _d, ...rest }) => rest as Conversation);
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const loadState = () => {
     try {
-      // Clean up legacy storage versions
-      ['wathive_app_state_v7', 'wathive_app_state_v8', 'wathive_app_state_v9', 'wathive_app_state_v10', 'wathive_app_state_v11', 'wathive_app_state_v12', 'wathive_app_state_v13'].forEach((k) => {
-        try { localStorage.removeItem(k); } catch {}
-      });
+      const legacyKeys = [
+        'wathive_app_state_v7',
+        'wathive_app_state_v8',
+        'wathive_app_state_v9',
+        'wathive_app_state_v10',
+        'wathive_app_state_v11',
+        'wathive_app_state_v12',
+        'wathive_app_state_v13',
+        'wathive_app_state_v14',
+        'wathive_app_state_v15'
+      ];
 
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
+        legacyKeys.forEach((k) => {
+          try { localStorage.removeItem(k); } catch {}
+        });
         return JSON.parse(stored);
+      }
+
+      // Carry forward removedChats / blockedUserIds from v15 across key bump so removed chats never resurrect
+      const prevV15 = localStorage.getItem('wathive_app_state_v15');
+      legacyKeys.forEach((k) => {
+        try { localStorage.removeItem(k); } catch {}
+      });
+      if (prevV15) {
+        return JSON.parse(prevV15);
       }
     } catch (e) {
       console.warn('Error reading stored state:', e);
@@ -178,18 +213,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3 | null>(
     initialCached?.onboardingStep !== undefined ? initialCached.onboardingStep : null
   );
-  const [events, setEvents] = useState<EventItem[]>(() => {
-    const cached = initialCached?.events;
-    if (Array.isArray(cached) && cached.length > 0) {
-      // Strictly retain only events scraped from WUSA
-      const wusaEventsOnly = cached.filter((e: EventItem) => e.id.startsWith('wusa_') || e.sourceVerification === 'wusa_official');
-      if (wusaEventsOnly.length >= 50) {
-        return wusaEventsOnly;
-      }
-    }
-    // INITIAL_EVENTS contains only real scraped events from WUSA
-    return INITIAL_EVENTS;
-  });
+  const [torontoNow, setTorontoNow] = useState<TorontoNowInfo>(() => getTorontoNow());
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const lastGoodApiEventsRef = React.useRef<EventItem[]>([]);
+  const lastFetchAtRef = React.useRef<number>(0);
+
+  // Events always start empty and load dynamically from /api/collector/preview (never cached in localStorage)
+  const [events, setEvents] = useState<EventItem[]>(() => [...INITIAL_EVENTS]);
   const [savedEventIds, setSavedEventIds] = useState<string[]>(
     initialCached?.savedEventIds || INITIAL_USER_SAVED
   );
@@ -203,18 +233,63 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [eventBuddySettings, setEventBuddySettings] = useState<Record<string, BuddyPrivacySettings>>(
     initialCached?.eventBuddySettings || {}
   );
-  const [connectionRequests, setConnectionRequests] = useState<ConnectionRequest[]>(
-    initialCached?.connectionRequests || INITIAL_REQUESTS
-  );
-  const [conversations, setConversations] = useState<Conversation[]>(
-    initialCached?.conversations || INITIAL_CONVERSATIONS
-  );
-  const [chatMessages, setChatMessages] = useState<Record<string, ChatMessage[]>>(
-    initialCached?.chatMessages || INITIAL_CHAT_MESSAGES
-  );
-  const [blockedUserIds, setBlockedUserIds] = useState<string[]>(
-    initialCached?.blockedUserIds || []
-  );
+
+  const [chatStore, setChatStore] = useState<ChatStateSnapshot>(() => {
+    const rawBlocked: string[] = Array.isArray(initialCached?.blockedUserIds)
+      ? initialCached.blockedUserIds
+      : [];
+    const rawRemoved: RemovedChatRecord[] = Array.isArray(initialCached?.removedChats)
+      ? initialCached.removedChats
+      : [];
+    const rawConvs: any[] = Array.isArray(initialCached?.conversations)
+      ? initialCached.conversations
+      : INITIAL_CONVERSATIONS;
+    const rawMsgs: Record<string, ChatMessage[]> =
+      initialCached?.chatMessages && typeof initialCached.chatMessages === 'object'
+        ? initialCached.chatMessages
+        : INITIAL_CHAT_MESSAGES;
+    const rawReqs: ConnectionRequest[] = Array.isArray(initialCached?.connectionRequests)
+      ? initialCached.connectionRequests
+      : INITIAL_REQUESTS;
+
+    // Migrate any legacy isBlocked/isDisconnected conversations into removedChats so they stay gone
+    const migratedRemoved = [...rawRemoved];
+    for (const c of rawConvs) {
+      if (c?.isBlocked) {
+        if (!rawBlocked.includes(c.partner?.id)) rawBlocked.push(c.partner.id);
+        migratedRemoved.push({
+          partnerId: c.partner.id,
+          eventId: null,
+          reason: 'blocked',
+          removedAt: new Date().toISOString()
+        });
+      } else if (c?.isDisconnected) {
+        migratedRemoved.push({
+          partnerId: c.partner.id,
+          eventId: c.eventId ?? null,
+          reason: 'left',
+          removedAt: new Date().toISOString()
+        });
+      }
+    }
+
+    return sanitizeChatSnapshot({
+      conversations: stripLegacyConversationFlags(rawConvs),
+      chatMessages: rawMsgs,
+      connectionRequests: rawReqs,
+      removedChats: migratedRemoved,
+      blockedUserIds: rawBlocked
+    });
+  });
+
+  const {
+    conversations,
+    chatMessages,
+    connectionRequests,
+    removedChats,
+    blockedUserIds
+  } = chatStore;
+
   const [reportedUserIds, setReportedUserIds] = useState<string[]>(
     initialCached?.reportedUserIds || []
   );
@@ -257,99 +332,170 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     initialCached?.auditLogs || INITIAL_AUDIT_LOGS
   );
 
-  // Save to localStorage
+  const buildPersistedState = React.useCallback(
+    (snapshot: ChatStateSnapshot) => ({
+      user,
+      isLoggedIn,
+      onboardingStep,
+      savedEventIds,
+      attendingEventIds,
+      attendeeVisibility,
+      eventBuddySettings,
+      connectionRequests: snapshot.connectionRequests,
+      conversations: snapshot.conversations,
+      chatMessages: snapshot.chatMessages,
+      removedChats: snapshot.removedChats,
+      blockedUserIds: snapshot.blockedUserIds,
+      reportedUserIds,
+      reportedEventIds,
+      reportsList,
+      declinedHistory,
+      dailyBuddyRequestsCount,
+      eventAttendeesMap,
+      notificationSettings,
+      notifications,
+      aggregationSources,
+      duplicateResults,
+      syncReports,
+      studentDiscounts,
+      auditLogs
+    }),
+    [
+      user,
+      isLoggedIn,
+      onboardingStep,
+      savedEventIds,
+      attendingEventIds,
+      attendeeVisibility,
+      eventBuddySettings,
+      reportedUserIds,
+      reportedEventIds,
+      reportsList,
+      declinedHistory,
+      dailyBuddyRequestsCount,
+      eventAttendeesMap,
+      notificationSettings,
+      notifications,
+      aggregationSources,
+      duplicateResults,
+      syncReports,
+      studentDiscounts,
+      auditLogs
+    ]
+  );
+
+  // Save user preferences & buddy state to localStorage (never persist events list)
   useEffect(() => {
     try {
-      const stateToSave = {
-        user,
-        isLoggedIn,
-        onboardingStep,
-        events,
-        savedEventIds,
-        attendingEventIds,
-        attendeeVisibility,
-        eventBuddySettings,
-        connectionRequests,
-        conversations,
-        chatMessages,
-        blockedUserIds,
-        reportedUserIds,
-        reportedEventIds,
-        reportsList,
-        declinedHistory,
-        dailyBuddyRequestsCount,
-        eventAttendeesMap,
-        notificationSettings,
-        notifications,
-        aggregationSources,
-        duplicateResults,
-        syncReports,
-        studentDiscounts,
-        auditLogs
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPersistedState(chatStore)));
     } catch (e) {
       console.error('Error saving state:', e);
     }
-  }, [
-    user,
-    isLoggedIn,
-    onboardingStep,
-    events,
-    savedEventIds,
-    attendingEventIds,
-    attendeeVisibility,
-    eventBuddySettings,
-    connectionRequests,
-    conversations,
-    chatMessages,
-    blockedUserIds,
-    reportedUserIds,
-    reportedEventIds,
-    reportsList,
-    declinedHistory,
-    dailyBuddyRequestsCount,
-    notificationSettings,
-    notifications,
-    aggregationSources,
-    duplicateResults,
-    syncReports,
-    studentDiscounts,
-    auditLogs
-  ]);
+  }, [buildPersistedState, chatStore]);
 
-  // Dynamically synchronize live collected WUSA events from the backend collector
-  useEffect(() => {
-    let isMounted = true;
-    fetch('/api/collector/preview')
-      .then((res) => res.json())
-      .then((data) => {
-        if (isMounted && data.success && Array.isArray(data.previewEvents) && data.previewEvents.length > 0) {
-          setEvents((prev) => {
-            const wusaOnly = prev.filter((e) => e.id.startsWith('wusa_') || e.sourceVerification === 'wusa_official');
-            const map = new Map(wusaOnly.map((e) => [e.id, e]));
-            for (const item of data.previewEvents as EventItem[]) {
-              map.set(item.id, item);
-            }
-            return Array.from(map.values());
-          });
+  const updateChatStoreAndPersist = React.useCallback(
+    (updater: (prev: ChatStateSnapshot) => ChatStateSnapshot) => {
+      setChatStore((prev) => {
+        const next = updater(prev);
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPersistedState(next)));
+        } catch (e) {
+          console.error('Error persisting state immediately:', e);
         }
-      })
-      .catch((err) => {
-        console.warn('WUSA collector live sync check skipped:', err);
+        return next;
       });
-    return () => {
-      isMounted = false;
-    };
+    },
+    [buildPersistedState]
+  );
+
+  const syncFromCollector = React.useCallback(async (force = false) => {
+    const currentMs = Date.now();
+    if (!force && currentMs - lastFetchAtRef.current < 30_000) return;
+    lastFetchAtRef.current = currentMs;
+
+    setNowMs(currentMs);
+    setTorontoNow(getTorontoNow(new Date(currentMs)));
+
+    try {
+      const res = await fetch('/api/collector/preview');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.previewEvents)) {
+        const fetched = (data.previewEvents as EventItem[]).filter(
+          (e) => !isEventPast(e, new Date(currentMs))
+        );
+        lastGoodApiEventsRef.current = fetched;
+        setEvents((prev) => {
+          // Retain only active non-WUSA student-created events if any were added in-session
+          const customActive = prev.filter(
+            (e) => !e.id.startsWith('wusa_') && !isEventPast(e, new Date(currentMs))
+          );
+          return [...customActive, ...fetched];
+        });
+      }
+    } catch (err) {
+      console.warn('WUSA collector live sync check skipped:', err);
+      if (lastGoodApiEventsRef.current.length > 0) {
+        const fallbackActive = lastGoodApiEventsRef.current.filter(
+          (e) => !isEventPast(e, new Date(currentMs))
+        );
+        setEvents((prev) => {
+          const customActive = prev.filter(
+            (e) => !e.id.startsWith('wusa_') && !isEventPast(e, new Date(currentMs))
+          );
+          return [...customActive, ...fallbackActive];
+        });
+      }
+    }
   }, []);
 
-  // Safeguard: immediately purge any non-WUSA events from state
+  // Live collector fetch on mount + 10m backend refresh + 60s lifecycle clock + focus/visibility re-check
   useEffect(() => {
-    setEvents((prev) => {
-      const filtered = prev.filter((e) => e.id.startsWith('wusa_') || e.sourceVerification === 'wusa_official');
-      return filtered.length !== prev.length ? filtered : prev;
-    });
-  }, []);
+    void syncFromCollector(true);
+
+    const apiIntervalId = window.setInterval(() => {
+      void syncFromCollector(true);
+    }, 10 * 60 * 1000);
+
+    const clockIntervalId = window.setInterval(() => {
+      const currentMs = Date.now();
+      setNowMs(currentMs);
+      setTorontoNow(getTorontoNow(new Date(currentMs)));
+    }, 60 * 1000);
+
+    const handleFocusOrVisible = () => {
+      if (document.visibilityState === 'hidden') return;
+      const currentMs = Date.now();
+      setNowMs(currentMs);
+      setTorontoNow(getTorontoNow(new Date(currentMs)));
+      void syncFromCollector(false);
+    };
+
+    window.addEventListener('focus', handleFocusOrVisible);
+    document.addEventListener('visibilitychange', handleFocusOrVisible);
+
+    return () => {
+      window.clearInterval(apiIntervalId);
+      window.clearInterval(clockIntervalId);
+      window.removeEventListener('focus', handleFocusOrVisible);
+      document.removeEventListener('visibilitychange', handleFocusOrVisible);
+    };
+  }, [syncFromCollector]);
+
+  // Re-evaluate Toronto current time cleanly at Toronto midnight
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const currentMs = Date.now();
+      setNowMs(currentMs);
+      setTorontoNow(getTorontoNow(new Date(currentMs)));
+    }, torontoNow.msUntilMidnightToronto + 1000);
+    return () => window.clearTimeout(timer);
+  }, [torontoNow]);
+
+  const upcomingEvents = React.useMemo(() => {
+    const nowDate = new Date(nowMs);
+    return events.filter((e) => !isEventPast(e, nowDate));
+  }, [events, nowMs]);
 
   const loginDemoUser = (asNewUser = false) => {
     if (asNewUser) {
@@ -527,9 +673,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
   };
 
-  // Attendees list: filtered by event, opt-in status, research exclusion, and blocked list
+  // Attendees list: filtered by event, opt-in status, research exclusion, blocked/reported/left pairs
   const getEventAttendees = (eventId: string): AttendeeProfile[] => {
-    const event = events.find((e) => e.id === eventId);
+    const event = upcomingEvents.find((e) => e.id === eventId);
     if (!event || event.isResearchStudy || event.status === 'cancelled' || event.status === 'ended') {
       return [];
     }
@@ -537,10 +683,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const attendeeIds = eventAttendeesMap[eventId] || [];
     const profiles: AttendeeProfile[] = [];
 
-    // Add opted-in sample attendees who are not blocked and verified
     for (const id of attendeeIds) {
       const attendee = SAMPLE_ATTENDEES[id];
-      if (attendee && !blockedUserIds.includes(id) && attendee.isVerifiedUWStudent) {
+      if (
+        attendee &&
+        attendee.isVerifiedUWStudent &&
+        !isChatRemovedForPair(id, eventId, removedChats, blockedUserIds)
+      ) {
         profiles.push(attendee);
       }
     }
@@ -573,7 +722,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Get prioritized compatible suggested matches for a specific event
   const getSuggestedMatches = (eventId: string): SuggestedMatchItem[] => {
-    const event = events.find((e) => e.id === eventId);
+    const event = upcomingEvents.find((e) => e.id === eventId);
     if (!event || event.isResearchStudy || event.status === 'cancelled' || event.status === 'ended') {
       return [];
     }
@@ -583,7 +732,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     for (const id of attendeeIds) {
       const attendee = SAMPLE_ATTENDEES[id];
-      if (attendee && !blockedUserIds.includes(id) && attendee.isVerifiedUWStudent) {
+      if (
+        attendee &&
+        attendee.isVerifiedUWStudent &&
+        !isChatRemovedForPair(id, eventId, removedChats, blockedUserIds)
+      ) {
         const compatibility = calculateCompatibility(
           user?.personalityQuiz || DEFAULT_ALEX_QUIZ,
           attendee.personalityQuiz,
@@ -614,7 +767,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const event = events.find((e) => e.id === eventId);
+    const event = upcomingEvents.find((e) => e.id === eventId);
     if (!event) return { success: false, message: 'Event not found.' };
 
     if (event.isResearchStudy) {
@@ -625,8 +778,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Buddy requests are closed for this event.' };
     }
 
-    if (blockedUserIds.includes(recipientId)) {
-      return { success: false, message: 'Unable to connect with this user.' };
+    const removalCheck = getRequestRejectionForRemovedChat(
+      recipientId,
+      eventId,
+      removedChats,
+      blockedUserIds
+    );
+    if (removalCheck.blocked) {
+      return { success: false, message: removalCheck.message };
     }
 
     // Daily limit enforcement (Max 5 requests per day)
@@ -707,22 +866,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString()
     };
 
-    setConnectionRequests((prev) => [newReq, ...prev]);
+    updateChatStoreAndPersist((prev) => ({
+      ...prev,
+      connectionRequests: [newReq, ...prev.connectionRequests]
+    }));
     setDailyBuddyRequestsCount((prev) => prev + 1);
 
-    // Simulate realistic acceptance after 4.5 seconds
+    // Simulate realistic acceptance after 4.5 seconds (only if still pending and not blocked/removed)
     setTimeout(() => {
-      setConnectionRequests((current) =>
-        current.map((req) => {
-          if (req.id === newReq.id && req.status === 'pending') {
-            return { ...req, status: 'accepted' };
-          }
-          return req;
-        })
-      );
+      updateChatStoreAndPersist((prev) => {
+        const liveReq = prev.connectionRequests.find((r) => r.id === newReq.id);
+        if (
+          !liveReq ||
+          liveReq.status !== 'pending' ||
+          isChatRemovedForPair(recipientId, eventId, prev.removedChats, prev.blockedUserIds)
+        ) {
+          return prev;
+        }
 
-      // Create conversation once accepted
-      if (recipient) {
         const convId = `conv_${recipientId}_${Date.now()}`;
         const newConv: Conversation = {
           id: convId,
@@ -734,39 +895,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           lastMessage: `Hey ${formatPublicName(user.name)}! I accepted your request to attend ${event.title} together (${compatResult.score}% match!). Looking forward to it!`,
           lastMessageTime: 'Just now',
           unreadCount: 1,
-          isBlocked: false,
           isReported: false,
-          isDisconnected: false,
           stayConnectedUser: false,
           stayConnectedPartner: false,
           isChatClosedPostEvent: false
         };
 
-        setConversations((prev) => [newConv, ...prev]);
-        setChatMessages((prev) => ({
+        const msgs: ChatMessage[] = [
+          ...(introMessage
+            ? [
+                {
+                  id: `m_intro_${Date.now()}`,
+                  conversationId: convId,
+                  senderId: user.id,
+                  text: introMessage,
+                  timestamp: 'Just now'
+                }
+              ]
+            : []),
+          {
+            id: `m_reply_${Date.now()}`,
+            conversationId: convId,
+            senderId: recipient.id,
+            text: `Hey ${formatPublicName(user.name)}! I accepted your request to attend ${event.title} together (${compatResult.score}% compatibility!). Looking forward to meeting up!`,
+            timestamp: 'Just now'
+          }
+        ];
+
+        return {
           ...prev,
-          [convId]: [
-            ...(introMessage
-              ? [
-                  {
-                    id: `m_intro_${Date.now()}`,
-                    conversationId: convId,
-                    senderId: user.id,
-                    text: introMessage,
-                    timestamp: 'Just now'
-                  }
-                ]
-              : []),
-            {
-              id: `m_reply_${Date.now()}`,
-              conversationId: convId,
-              senderId: recipient.id,
-              text: `Hey ${formatPublicName(user.name)}! I accepted your request to attend ${event.title} together (${compatResult.score}% compatibility!). Looking forward to meeting up!`,
-              timestamp: 'Just now'
-            }
-          ]
-        }));
-      }
+          connectionRequests: prev.connectionRequests.map((req) =>
+            req.id === newReq.id ? { ...req, status: 'accepted' } : req
+          ),
+          conversations: [newConv, ...prev.conversations],
+          chatMessages: {
+            ...prev.chatMessages,
+            [convId]: msgs
+          }
+        };
+      });
     }, 4500);
 
     return {
@@ -783,16 +950,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (action === 'decline') {
       const declineKey = `${req.eventId}_${req.senderId}_${req.recipientId}`;
       setDeclinedHistory((prev) => [...prev, declineKey]);
-      setConnectionRequests((prev) =>
-        prev.map((r) => (r.id === requestId ? { ...r, status: 'declined' } : r))
-      );
+      updateChatStoreAndPersist((prev) => ({
+        ...prev,
+        connectionRequests: prev.connectionRequests.map((r) =>
+          r.id === requestId ? { ...r, status: 'declined' } : r
+        )
+      }));
       return;
     }
-
-    // Accept request
-    setConnectionRequests((prev) =>
-      prev.map((r) => (r.id === requestId ? { ...r, status: 'accepted' } : r))
-    );
 
     const partner: AttendeeProfile = SAMPLE_ATTENDEES[req.senderId] || {
       id: req.senderId,
@@ -804,29 +969,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isVerifiedUWStudent: true
     };
 
-    const convId = `conv_${req.senderId}_${Date.now()}`;
-    const newConv: Conversation = {
-      id: convId,
-      eventId: req.eventId,
-      eventTitle: req.eventTitle,
-      eventDate: req.eventDate,
-      eventLocation: 'Campus Venue',
-      partner,
-      lastMessage: req.introMessage || 'Connected to attend together!',
-      lastMessageTime: 'Just now',
-      unreadCount: 0,
-      isBlocked: false,
-      isReported: false,
-      isDisconnected: false,
-      stayConnectedUser: false,
-      stayConnectedPartner: false,
-      isChatClosedPostEvent: false
-    };
+    updateChatStoreAndPersist((prev) => {
+      if (isChatRemovedForPair(partner.id, req.eventId, prev.removedChats, prev.blockedUserIds)) {
+        return prev;
+      }
+      const convId = `conv_${req.senderId}_${Date.now()}`;
+      const newConv: Conversation = {
+        id: convId,
+        eventId: req.eventId,
+        eventTitle: req.eventTitle,
+        eventDate: req.eventDate,
+        eventLocation: 'Campus Venue',
+        partner,
+        lastMessage: req.introMessage || 'Connected to attend together!',
+        lastMessageTime: 'Just now',
+        unreadCount: 0,
+        isReported: false,
+        stayConnectedUser: false,
+        stayConnectedPartner: false,
+        isChatClosedPostEvent: false
+      };
 
-    setConversations((prev) => [newConv, ...prev.filter((c) => c.partner.id !== partner.id)]);
-    setChatMessages((prev) => ({
-      ...prev,
-      [convId]: [
+      const msgs: ChatMessage[] = [
         ...(req.introMessage
           ? [
               {
@@ -845,112 +1009,84 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           text: `Hey ${partner.name}! Excited to check out ${req.eventTitle} together!`,
           timestamp: 'Just now'
         }
-      ]
-    }));
+      ];
+
+      return {
+        ...prev,
+        connectionRequests: prev.connectionRequests.map((r) =>
+          r.id === requestId ? { ...r, status: 'accepted' } : r
+        ),
+        conversations: [
+          newConv,
+          ...prev.conversations.filter(
+            (c) => !(c.partner.id === partner.id && c.eventId === req.eventId)
+          )
+        ],
+        chatMessages: {
+          ...prev.chatMessages,
+          [convId]: msgs
+        }
+      };
+    });
   };
 
   const withdrawConnectionRequest = (requestId: string) => {
-    setConnectionRequests((prev) =>
-      prev.map((r) => (r.id === requestId ? { ...r, status: 'withdrawn' } : r))
-    );
-  };
-
-  const disconnectConversation = (conversationId: string) => {
-    setConversations((prev) =>
-      prev.map((c) =>
-        c.id === conversationId
-          ? {
-              ...c,
-              isDisconnected: true,
-              lastMessage: 'Conversation disconnected.',
-              lastMessageTime: 'Just now'
-            }
-          : c
-      )
-    );
-
-    const systemMsg: ChatMessage = {
-      id: `sys_${Date.now()}`,
-      conversationId,
-      senderId: 'system',
-      text: 'You have left this conversation and disconnected. No further messages can be exchanged.',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-
-    setChatMessages((prev) => ({
+    updateChatStoreAndPersist((prev) => ({
       ...prev,
-      [conversationId]: [...(prev[conversationId] || []), systemMsg]
+      connectionRequests: prev.connectionRequests.map((r) =>
+        r.id === requestId ? { ...r, status: 'withdrawn' } : r
+      )
     }));
   };
 
+  const removeConversations = (params: RemoveConversationsParams) => {
+    updateChatStoreAndPersist((prev) => applyRemoveConversations(prev, params));
+  };
+
   const toggleStayConnected = (conversationId: string) => {
-    setConversations((prev) =>
-      prev.map((c) => {
-        if (c.id === conversationId) {
-          const nextUserChoice = !c.stayConnectedUser;
-          return {
-            ...c,
-            stayConnectedUser: nextUserChoice
-          };
-        }
-        return c;
-      })
-    );
+    updateChatStoreAndPersist((prev) => ({
+      ...prev,
+      conversations: prev.conversations.map((c) =>
+        c.id === conversationId
+          ? { ...c, stayConnectedUser: !c.stayConnectedUser }
+          : c
+      )
+    }));
   };
 
   const simulatePartnerStayConnected = (conversationId: string) => {
-    setConversations((prev) =>
-      prev.map((c) => {
-        if (c.id === conversationId) {
-          return {
-            ...c,
-            stayConnectedPartner: !c.stayConnectedPartner
-          };
-        }
-        return c;
-      })
-    );
+    updateChatStoreAndPersist((prev) => ({
+      ...prev,
+      conversations: prev.conversations.map((c) =>
+        c.id === conversationId
+          ? { ...c, stayConnectedPartner: !c.stayConnectedPartner }
+          : c
+      )
+    }));
   };
 
   const toggleChatPostEventClosed = (conversationId: string) => {
-    setConversations((prev) =>
-      prev.map((c) =>
+    updateChatStoreAndPersist((prev) => ({
+      ...prev,
+      conversations: prev.conversations.map((c) =>
         c.id === conversationId
-          ? {
-              ...c,
-              isChatClosedPostEvent: !c.isChatClosedPostEvent
-            }
+          ? { ...c, isChatClosedPostEvent: !c.isChatClosedPostEvent }
           : c
       )
-    );
-  };
-
-  const toggleSimulateEventEnded = (eventId: string) => {
-    setEvents((prev) =>
-      prev.map((ev) => {
-        if (ev.id === eventId) {
-          const newStatus = ev.status === 'ended' ? 'published' : 'ended';
-          return { ...ev, status: newStatus };
-        }
-        return ev;
-      })
-    );
-
-    setConnectionRequests((prev) =>
-      prev.map((r) => {
-        if (r.eventId === eventId && r.status === 'pending') {
-          return { ...r, status: 'expired' };
-        }
-        return r;
-      })
-    );
+    }));
   };
 
   const sendMessage = (conversationId: string, text: string) => {
     if (!user || !text.trim()) return;
 
     const conv = conversations.find((c) => c.id === conversationId);
-    if (!conv || conv.isBlocked || conv.isDisconnected || conv.isChatClosedPostEvent) return;
+    if (
+      !conv ||
+      conv.isChatClosedPostEvent ||
+      isPartnerBlockedOrReported(conv.partner.id, removedChats, blockedUserIds)
+    ) {
+      return;
+    }
 
     const newMsg: ChatMessage = {
       id: `m_${Date.now()}`,
@@ -960,24 +1096,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
-    setChatMessages((prev) => ({
-      ...prev,
-      [conversationId]: [...(prev[conversationId] || []), newMsg]
-    }));
+    updateChatStoreAndPersist((prev) => {
+      if (!prev.conversations.some((c) => c.id === conversationId)) return prev;
+      return {
+        ...prev,
+        chatMessages: {
+          ...prev.chatMessages,
+          [conversationId]: [...(prev.chatMessages[conversationId] || []), newMsg]
+        },
+        conversations: prev.conversations.map((c) =>
+          c.id === conversationId
+            ? { ...c, lastMessage: text.trim(), lastMessageTime: 'Just now' }
+            : c
+        )
+      };
+    });
 
-    setConversations((prev) =>
-      prev.map((c) =>
-        c.id === conversationId
-          ? {
-              ...c,
-              lastMessage: text.trim(),
-              lastMessageTime: 'Just now'
-            }
-          : c
-      )
-    );
-
-    // Realistic partner reply
+    // Realistic partner reply (only if conversation still exists after delay)
     setTimeout(() => {
       const partnerReplies = [
         "Sounds like a plan! Let's meet right at the registration desk about 10 minutes before.",
@@ -995,46 +1130,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
 
-      setChatMessages((prev) => ({
-        ...prev,
-        [conversationId]: [...(prev[conversationId] || []), replyMsg]
-      }));
-
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.id === conversationId
-            ? {
-                ...c,
-                lastMessage: randomReply,
-                lastMessageTime: 'Just now'
-              }
-            : c
-        )
-      );
+      updateChatStoreAndPersist((prev) => {
+        if (!prev.conversations.some((c) => c.id === conversationId)) return prev;
+        return {
+          ...prev,
+          chatMessages: {
+            ...prev.chatMessages,
+            [conversationId]: [...(prev.chatMessages[conversationId] || []), replyMsg]
+          },
+          conversations: prev.conversations.map((c) =>
+            c.id === conversationId
+              ? { ...c, lastMessage: randomReply, lastMessageTime: 'Just now' }
+              : c
+          )
+        };
+      });
     }, 1800);
   };
 
   const blockUser = (userId: string) => {
-    setBlockedUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
-
-    setConversations((prev) =>
-      prev.map((c) => (c.partner.id === userId ? { ...c, isBlocked: true } : c))
-    );
-
-    setConnectionRequests((prev) =>
-      prev.map((r) =>
-        r.senderId === userId || r.recipientId === userId
-          ? { ...r, status: 'withdrawn' }
-          : r
-      )
-    );
+    removeConversations({ partnerId: userId, reason: 'blocked' });
   };
 
   const unblockUser = (userId: string) => {
-    setBlockedUserIds((prev) => prev.filter((id) => id !== userId));
-    setConversations((prev) =>
-      prev.map((c) => (c.partner.id === userId ? { ...c, isBlocked: false } : c))
-    );
+    updateChatStoreAndPersist((prev) => applyUnblockUser(prev, userId));
   };
 
   const reportItem = (
@@ -1059,7 +1178,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (targetType === 'user') {
       setReportedUserIds((prev) => (prev.includes(targetId) ? prev : [...prev, targetId]));
-      blockUser(targetId);
+      removeConversations({ partnerId: targetId, reason: 'reported' });
     } else {
       setReportedEventIds((prev) => (prev.includes(targetId) ? prev : [...prev, targetId]));
     }
@@ -1274,19 +1393,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const resetDemoData = () => {
-    localStorage.removeItem(STORAGE_KEY);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+      [
+        'wathive_app_state_v7',
+        'wathive_app_state_v8',
+        'wathive_app_state_v9',
+        'wathive_app_state_v10',
+        'wathive_app_state_v11',
+        'wathive_app_state_v12',
+        'wathive_app_state_v13',
+        'wathive_app_state_v14',
+        'wathive_app_state_v15'
+      ].forEach((k) => localStorage.removeItem(k));
+    } catch {
+      // ignore storage errors
+    }
     setUser(INITIAL_USER);
     setIsLoggedIn(true);
     setOnboardingStep(null);
-    setEvents(INITIAL_EVENTS);
+    setEvents([]);
+    void syncFromCollector(true);
     setSavedEventIds(INITIAL_USER_SAVED);
     setAttendingEventIds(INITIAL_USER_ATTENDING);
     setAttendeeVisibilityMap(INITIAL_USER_VISIBILITY);
     setEventBuddySettings({});
-    setConnectionRequests(INITIAL_REQUESTS);
-    setConversations(INITIAL_CONVERSATIONS);
-    setChatMessages(INITIAL_CHAT_MESSAGES);
-    setBlockedUserIds([]);
+    setChatStore(
+      sanitizeChatSnapshot({
+        conversations: INITIAL_CONVERSATIONS,
+        chatMessages: INITIAL_CHAT_MESSAGES,
+        connectionRequests: INITIAL_REQUESTS,
+        removedChats: [],
+        blockedUserIds: []
+      })
+    );
     setReportedUserIds([]);
     setReportedEventIds([]);
     setReportsList([]);
@@ -1390,46 +1530,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const unreadNotificationsCount = notifications.filter((n) => !n.read).length;
 
-  const rankForYouEvents = (eventsList: EventItem[]): EventItem[] => {
-    if (!user || user.preferences.noPreferences) {
-      return [...eventsList].sort((a, b) => (a.date > b.date ? 1 : -1));
-    }
-
-    const { categories, preferredFaculties } = user.preferences;
-
-    return [...eventsList].sort((a, b) => {
-      if (a.status === 'cancelled' && b.status !== 'cancelled') return 1;
-      if (b.status === 'cancelled' && a.status !== 'cancelled') return -1;
-
-      let scoreA = 0;
-      let scoreB = 0;
-
-      if (categories.includes(a.category)) scoreA += 4;
-      if (categories.includes(b.category)) scoreB += 4;
-
-      if (a.facultyAffiliation && preferredFaculties.includes(a.facultyAffiliation)) scoreA += 2;
-      if (b.facultyAffiliation && preferredFaculties.includes(b.facultyAffiliation)) scoreB += 2;
-
-      // Bonus for official institutional verification and campus-wide availability
-      if (a.sourceVerification === 'wusa_official') scoreA += 2;
-      if (b.sourceVerification === 'wusa_official') scoreB += 2;
-      if (!a.facultyAffiliation || a.facultyAffiliation === 'All Faculties') scoreA += 1;
-      if (!b.facultyAffiliation || b.facultyAffiliation === 'All Faculties') scoreB += 1;
-
-      if (scoreA === scoreB) {
-        return a.date > b.date ? 1 : -1;
-      }
-      return scoreB - scoreA;
-    });
-  };
-
   return (
     <AppContext.Provider
       value={{
         user,
         isLoggedIn,
         onboardingStep,
-        events,
+        events: upcomingEvents,
+        upcomingEvents,
         savedEventIds,
         attendingEventIds,
         attendeeVisibility,
@@ -1438,6 +1546,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         conversations,
         chatMessages,
         blockedUserIds,
+        removedChats,
         reportedUserIds,
         reportedEventIds,
         reportsList,
@@ -1462,11 +1571,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         respondConnectionRequest,
         withdrawConnectionRequest,
         sendMessage,
-        disconnectConversation,
+        removeConversations,
         toggleStayConnected,
         simulatePartnerStayConnected,
         toggleChatPostEventClosed,
-        toggleSimulateEventEnded,
         blockUser,
         unblockUser,
         reportItem,
@@ -1474,7 +1582,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateEvent,
         cancelEvent,
         resetDemoData,
-        rankForYouEvents,
         notificationSettings,
         updateNotificationSettings,
         notifications,

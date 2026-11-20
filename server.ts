@@ -1,16 +1,21 @@
+import crypto from 'node:crypto';
 import express from 'express';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db } from './server/db.js';
 import { collector } from './server/wusaCollector.js';
 import { scheduler } from './server/scheduler.js';
-import { exportToJson, exportToCsv } from './server/export.js';
 import { mapToWatHiveEventItem } from './server/previewMapper.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
 const resolvedPort = (() => {
   const defaultPort = parseInt(process.env.DEFAULT_APP_PORT || '3000', 10);
   if (process.env.NODE_ENV !== 'production') {
@@ -22,50 +27,120 @@ const resolvedPort = (() => {
   return defaultPort;
 })();
 const PORT = Number.isFinite(resolvedPort) ? resolvedPort : 3000;
-const ADMIN_PASSWORD = process.env.WUSA_ADMIN_SECRET || 'wathive_admin_2026';
+const ADMIN_SECRET = process.env.WUSA_ADMIN_SECRET?.trim() || '';
+const MIN_ADMIN_SECRET_LENGTH = 16;
 
-app.use(express.json({ limit: '10mb' }));
+// Security headers & Content Security Policy (same-origin + allowlisted fonts/images, iframe-safe in AI Studio preview)
+app.use(
+  helmet({
+    frameguard: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        objectSrc: ["'none'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+        fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+        imgSrc: [
+          "'self'",
+          'data:',
+          'blob:',
+          'https:'
+        ],
+        connectSrc: ["'self'", 'ws:', 'wss:'],
+        frameAncestors: [
+          "'self'",
+          'https://*.google.com',
+          'https://*.googleusercontent.com',
+          'https://*.usercontent.goog'
+        ],
+        formAction: ["'self'"]
+      }
+    }
+  })
+);
 
-// --- COLLECTOR API ROUTES ---
+app.use(express.json({ limit: '100kb' }));
 
-// 1. Auth check
-app.post('/api/collector/auth', (req, res) => {
-  const { password } = req.body;
-  if (!password) {
-    return res.status(400).json({ success: false, error: 'Password required' });
-  }
-  if (password === ADMIN_PASSWORD) {
-    return res.json({ success: true, token: 'wusa_session_' + Date.now() });
-  }
-  return res.status(401).json({ success: false, error: 'Invalid admin credentials' });
+// General API rate limit (~120 req/min/IP)
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many requests. Please try again shortly.' }
+});
+app.use('/api', apiLimiter);
+
+// Strict rate limit for manual admin sync (~5 req/hr/IP)
+const adminSyncLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Admin sync rate limit exceeded.' }
 });
 
-// 2. Status & stats
-app.get('/api/collector/status', (req, res) => {
+function isTimingSafeSecretMatch(provided: string, expected: string): boolean {
+  const providedDigest = crypto.createHash('sha256').update(provided, 'utf8').digest();
+  const expectedDigest = crypto.createHash('sha256').update(expected, 'utf8').digest();
+  return crypto.timingSafeEqual(providedDigest, expectedDigest);
+}
+
+const requireAdminSecret: express.RequestHandler = (req, res, next) => {
+  // When unconfigured or below minimum length, behave as disabled (404)
+  if (!ADMIN_SECRET || ADMIN_SECRET.length < MIN_ADMIN_SECRET_LENGTH) {
+    return res.status(404).json({ success: false, error: 'Not found' });
+  }
+
+  const authHeader = req.headers.authorization;
+  const bearerToken =
+    typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+      ? authHeader.slice('Bearer '.length).trim()
+      : '';
+
+  if (!bearerToken || !isTimingSafeSecretMatch(bearerToken, ADMIN_SECRET)) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  return next();
+};
+
+// --- PUBLIC & ADMIN API ROUTES ---
+
+// 1. Server America/Toronto current time
+app.get('/api/now', (_req, res) => {
+  const now = new Date();
+  const toronto = db.getTorontoDateTimeNow(now);
+  res.json({
+    success: true,
+    timezone: 'America/Toronto',
+    iso: now.toISOString(),
+    ...toronto
+  });
+});
+
+// 2. WatHive upcoming events feed
+app.get('/api/collector/preview', (_req, res) => {
   try {
-    const status = scheduler.getStatus();
-    const stats = db.getStats();
+    const events = db.getAllEventsRaw();
+    const previewList = events.slice(0, 200).map(mapToWatHiveEventItem);
     res.json({
       success: true,
-      ...status,
-      stats
+      totalAvailable: events.length,
+      sampleSize: previewList.length,
+      previewEvents: previewList
     });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+  } catch {
+    res.status(500).json({ success: false, error: 'Failed to load events' });
   }
 });
 
-app.get('/api/collector/stats', (req, res) => {
-  try {
-    const stats = db.getStats();
-    res.json({ success: true, stats });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 3. Trigger manual sync (with mutex guard)
-app.post('/api/collector/sync', async (req, res) => {
+// 3. Single protected manual sync endpoint
+app.post('/api/admin/sync', adminSyncLimiter, requireAdminSecret, async (_req, res) => {
   if (collector.isBusy()) {
     return res.status(409).json({
       success: false,
@@ -74,181 +149,26 @@ app.post('/api/collector/sync', async (req, res) => {
   }
 
   try {
-    // Run sync and wait for results so user sees immediate results
     const run = await collector.executeSync('manual');
-    res.json({ success: true, run });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 4. Events listing & filter
-app.get('/api/collector/events', (req, res) => {
-  try {
-    const {
-      search,
-      status,
-      temporal_status,
-      category,
-      review_status,
-      approval_status,
-      page,
-      limit
-    } = req.query;
-
-    const result = db.getEvents({
-      search: search as string,
-      status: status as string,
-      temporal_status: temporal_status as string,
-      category: category as string,
-      review_status: review_status as string,
-      approval_status: approval_status as string,
-      page: page ? parseInt(page as string, 10) : 1,
-      limit: limit ? parseInt(limit as string, 10) : 50
-    });
-
-    res.json({ success: true, ...result });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 5. Single event & change history
-app.get('/api/collector/events/:id', (req, res) => {
-  try {
-    const event = db.getStoredEvent(req.params.id);
-    if (!event) {
-      return res.status(404).json({ success: false, error: 'Event not found' });
-    }
-    const history = db.getEventHistory(req.params.id);
-    res.json({ success: true, event, history });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 6. Manual edit and approval
-app.put('/api/collector/events/:id', (req, res) => {
-  try {
-    const { updates } = req.body;
-    if (!updates) {
-      return res.status(400).json({ success: false, error: 'No updates provided' });
-    }
-
-    const success = db.updateEventManual(req.params.id, updates);
-    if (!success) {
-      return res.status(404).json({ success: false, error: 'Event not found' });
-    }
-
-    const updated = db.getStoredEvent(req.params.id);
-    const history = db.getEventHistory(req.params.id);
-    res.json({ success: true, event: updated, history });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 7. Recurring series
-app.get('/api/collector/series', (req, res) => {
-  try {
-    const series = db.getRecurringSeries();
-    res.json({ success: true, series });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 8. Sync runs & logs
-app.get('/api/collector/runs', (req, res) => {
-  try {
-    const runs = db.getSyncRuns(50);
-    res.json({ success: true, runs });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 9. Config management
-app.get('/api/collector/config', (req, res) => {
-  try {
-    const config = db.getConfig();
-    res.json({ success: true, config });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.post('/api/collector/config', (req, res) => {
-  try {
-    const { config } = req.body;
-    if (!config) {
-      return res.status(400).json({ success: false, error: 'Config required' });
-    }
-    db.saveConfig(config);
-    scheduler.updateSchedule();
-    res.json({ success: true, config: db.getConfig() });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 10. Data exports (JSON & CSV)
-app.get('/api/collector/export/json', (req, res) => {
-  try {
-    const events = db.getAllEventsRaw();
-    const jsonStr = exportToJson(events);
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', 'attachment; filename="wusa_events_collected.json"');
-    res.send(jsonStr);
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.get('/api/collector/export/csv', (req, res) => {
-  try {
-    const events = db.getAllEventsRaw();
-    const csvStr = exportToCsv(events);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="wusa_events_collected.csv"');
-    res.send(csvStr);
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 11. WatHive preview mapping
-app.get('/api/collector/preview', (req, res) => {
-  try {
-    const events = db.getAllEventsRaw();
-    const previewList = events.slice(0, 50).map(mapToWatHiveEventItem);
     res.json({
       success: true,
-      totalAvailable: events.length,
-      sampleSize: previewList.length,
-      previewEvents: previewList,
-      targetSchema: {
-        entity: 'EventItem',
-        mappedFields: [
-          'id -> wusa_{source_id}',
-          'title -> title (clean decoded)',
-          'category -> mapped to WatHive EventCategory',
-          'organizer -> organizer.name',
-          'organizerType -> mapped to WUSA / Clubs / Societies',
-          'date -> YYYY-MM-DD',
-          'startTime -> HH:mm (24h)',
-          'endTime -> HH:mm (24h)',
-          'location -> venue.name + room',
-          'price -> cost raw preserved',
-          'registrationUrl -> extracted tickets/rsvp url',
-          'utcIsoString -> start_iso with Toronto DST offset',
-          'sourceVerification -> "wusa_official"'
-        ]
+      run: {
+        id: run.id,
+        status: run.status,
+        events_found: run.events_found,
+        events_new: run.events_new,
+        events_updated: run.events_updated,
+        events_unchanged: run.events_unchanged
       }
     });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+  } catch {
+    res.status(500).json({ success: false, error: 'Sync run failed' });
   }
+});
+
+// Return JSON 404 for unknown /api routes
+app.all('/api/*', (_req, res) => {
+  res.status(404).json({ success: false, error: 'Not found' });
 });
 
 // --- VITE MIDDLEWARE / STATIC ASSETS ---
@@ -274,17 +194,17 @@ async function startServer() {
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`=======================================================`);
-    console.log(`WatHive WUSA Event Collector Backend running on port ${PORT}`);
-    console.log(`Admin Dashboard URL: http://localhost:${PORT}/?view=wusa-collector`);
-    console.log(`Daily Schedule: 6:00 AM America/Toronto`);
+    console.log(`WatHive Backend running on port ${PORT}`);
+    console.log(`Hourly Auto-Sync + Startup Sync Enabled (America/Toronto)`);
     console.log(`=======================================================`);
+    scheduler.runInitialSyncOnStart();
   });
 
   const shutdown = async (signal: string) => {

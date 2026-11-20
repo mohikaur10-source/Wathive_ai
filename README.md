@@ -75,5 +75,5 @@ Built by a collaborative group of University of Waterloo students across differe
 * **Isha Saxena**
 * **Vanshika Bansal**
 * **Mohi Kambo**
-* **Elleena**
-* **Lakshmi**
+* **Elleena Dowlatram**
+* **Lakshmi Muralidhar**

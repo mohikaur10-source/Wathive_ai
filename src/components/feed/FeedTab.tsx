@@ -7,10 +7,11 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  RotateCcw
+  RotateCcw,
+  Pin
 } from 'lucide-react';
 import { useReducedMotion } from 'motion/react';
-import { EventItem } from '../../types';
+import { EventFilterTag, EventItem, SavedFilterType } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { EventCard } from './EventCard';
 import { EventDetailModal } from './EventDetailModal';
@@ -22,15 +23,21 @@ import {
   resolveDateRange,
   eventOverlapsDateRange
 } from '../../utils/dateRange';
+import {
+  LOCATION_BUCKETS,
+  matchesLocationBucket,
+  getFilterTagKey,
+  mergeSavedAndTemporaryFilters,
+  filterEventsByTags
+} from '../../utils/eventFilters';
 
 interface FeedTabProps {
-  onNavigateToMessages?: () => void;
+  onNavigateToMessages?: (subTab?: 'conversations' | 'requests') => void;
   onOpenPreferences?: () => void;
   onOpenProfile?: () => void;
   onOpenAuth?: () => void;
 }
 
-type LocationBucket = 'all' | 'slc' | 'eng' | 'mc_dc' | 'pac_cif' | 'online' | 'off_campus';
 type SectionKey = 'category' | 'faculty' | 'location' | 'price';
 
 const SIDEBAR_MIN_WIDTH = 220;
@@ -42,51 +49,8 @@ const STORAGE_OPEN_KEY = 'wathive_filters_open';
 const STORAGE_WIDTH_KEY = 'wathive_filters_width';
 const STORAGE_ACCORDION_KEY = 'wathive_filters_collapsed';
 
-const LOCATION_BUCKETS: { id: LocationBucket; label: string }[] = [
-  { id: 'all', label: 'All Locations' },
-  { id: 'slc', label: 'Student Life Centre (SLC)' },
-  { id: 'eng', label: 'Engineering (E5 / E7)' },
-  { id: 'mc_dc', label: 'Math & Davis (MC / DC)' },
-  { id: 'pac_cif', label: 'Athletics (PAC / CIF)' },
-  { id: 'online', label: 'Online / Virtual' },
-  { id: 'off_campus', label: 'Off-Campus & Uptown' }
-];
-
-function matchesLocationBucket(ev: EventItem, bucket: LocationBucket): boolean {
-  if (bucket === 'all') return true;
-  const loc = (ev.location + ' ' + (ev.venueName || '')).toLowerCase();
-  if (bucket === 'online') {
-    return ev.isOnline || loc.includes('online') || loc.includes('virtual') || loc.includes('zoom');
-  }
-  if (bucket === 'slc') {
-    return (
-      loc.includes('slc') ||
-      loc.includes('student life') ||
-      loc.includes('great hall') ||
-      loc.includes('black and gold') ||
-      loc.includes('multi-purpose')
-    );
-  }
-  if (bucket === 'eng') {
-    return loc.includes('e7') || loc.includes('e5') || loc.includes('e2') || loc.includes('engineering') || loc.includes('cph');
-  }
-  if (bucket === 'mc_dc') {
-    return loc.includes('mc ') || loc.includes('mc,') || loc.includes('math') || loc.includes('davis') || loc.includes('dc ');
-  }
-  if (bucket === 'pac_cif') {
-    return loc.includes('pac') || loc.includes('cif') || loc.includes('icefield') || loc.includes('physical activities') || loc.includes('gym');
-  }
-  if (bucket === 'off_campus') {
-    return (
-      !ev.isOnline &&
-      !matchesLocationBucket(ev, 'slc') &&
-      !matchesLocationBucket(ev, 'eng') &&
-      !matchesLocationBucket(ev, 'mc_dc') &&
-      !matchesLocationBucket(ev, 'pac_cif')
-    );
-  }
-  return true;
-}
+const SAVED_FILTER_PROTECTED_MSG =
+  'Saved filter — go to Profile > Saved Filters to change or remove it.';
 
 function readStoredBool(key: string, fallback: boolean): boolean {
   try {
@@ -129,19 +93,20 @@ function readStoredCollapsedSections(): Partial<Record<SectionKey, boolean>> {
   return {};
 }
 
-export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
-  const { events, getEventAttendees } = useApp();
+export const FeedTab: React.FC<FeedTabProps> = ({
+  onNavigateToMessages,
+  onOpenProfile
+}) => {
+  const { events, getEventAttendees, savedFilters } = useApp();
   const prefersReduced = Boolean(useReducedMotion());
 
   const [sortMode, setSortMode] = useState<'soonest' | 'buddies'>('soonest');
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string>('all');
-  const [selectedLocation, setSelectedLocation] = useState<LocationBucket>('all');
+  const [temporaryFilters, setTemporaryFilters] = useState<EventFilterTag[]>([]);
   const [selectedDateFilter, setSelectedDateFilter] = useState<DateRangePreset>('all');
   const [customStartDate, setCustomStartDate] = useState<string>('');
   const [customEndDate, setCustomEndDate] = useState<string>('');
-  const [selectedFaculty, setSelectedFaculty] = useState<string>('all');
-  const [priceFilter, setPriceFilter] = useState<'all' | 'free' | 'paid'>('all');
+  const [filterToast, setFilterToast] = useState('');
 
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() =>
     readStoredBool(STORAGE_OPEN_KEY, true)
@@ -158,7 +123,43 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
   const [selectedEventForDetail, setSelectedEventForDetail] = useState<EventItem | null>(null);
 
   const customRangeRef = useRef<HTMLDivElement | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
   const todayStr = getTorontoNow().dateStr;
+
+  const showFilterToast = (msg: string) => {
+    setFilterToast(msg);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setFilterToast('');
+      toastTimerRef.current = null;
+    }, 3600);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Derive deduplicated union of savedFilters + temporaryFilters
+  const effectiveFilters = useMemo(
+    () => mergeSavedAndTemporaryFilters(savedFilters, temporaryFilters),
+    [savedFilters, temporaryFilters]
+  );
+
+  const savedKeySet = useMemo(
+    () => new Set(savedFilters.map((f) => getFilterTagKey(f.type, f.value))),
+    [savedFilters]
+  );
+
+  const effectiveKeySet = useMemo(
+    () => new Set(effectiveFilters.map((f) => f.key)),
+    [effectiveFilters]
+  );
 
   useEffect(() => {
     try {
@@ -272,46 +273,10 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
     [selectedDateFilter, customStartDate, customEndDate, todayStr]
   );
 
-  const baseFilteredEvents = useMemo(() => {
-    let filtered = [...publishedEvents];
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      filtered = filtered.filter(
-        (e) =>
-          e.title.toLowerCase().includes(q) ||
-          e.organizer.toLowerCase().includes(q) ||
-          e.description.toLowerCase().includes(q) ||
-          e.location.toLowerCase().includes(q) ||
-          e.category.toLowerCase().includes(q)
-      );
-    }
-
-    if (selectedCategory !== 'all') {
-      filtered = filtered.filter((e) => e.category === selectedCategory);
-    }
-
-    if (selectedLocation !== 'all') {
-      filtered = filtered.filter((e) => matchesLocationBucket(e, selectedLocation));
-    }
-
-    if (selectedFaculty !== 'all') {
-      filtered = filtered.filter(
-        (e) =>
-          !e.facultyAffiliation ||
-          e.facultyAffiliation === 'All Faculties' ||
-          e.facultyAffiliation === selectedFaculty
-      );
-    }
-
-    if (priceFilter === 'free') {
-      filtered = filtered.filter((e) => e.isFree);
-    } else if (priceFilter === 'paid') {
-      filtered = filtered.filter((e) => !e.isFree);
-    }
-
-    return filtered;
-  }, [publishedEvents, searchQuery, selectedCategory, selectedLocation, selectedFaculty, priceFilter]);
+  const baseFilteredEvents = useMemo(
+    () => filterEventsByTags(publishedEvents, effectiveFilters, searchQuery),
+    [publishedEvents, effectiveFilters, searchQuery]
+  );
 
   const dateFilteredEvents = useMemo(
     () => publishedEvents.filter((e) => eventOverlapsDateRange(e, activeDateRange)),
@@ -371,25 +336,48 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
     });
   }, [baseFilteredEvents, todayStr]);
 
-  const sidebarFiltersCount =
-    (selectedCategory !== 'all' ? 1 : 0) +
-    (selectedFaculty !== 'all' ? 1 : 0) +
-    (selectedLocation !== 'all' ? 1 : 0) +
-    (priceFilter !== 'all' ? 1 : 0);
+  const handleToggleSidebarTag = (tag: EventFilterTag) => {
+    const key = getFilterTagKey(tag.type, tag.value);
+    if (savedKeySet.has(key)) {
+      showFilterToast(SAVED_FILTER_PROTECTED_MSG);
+      return;
+    }
+    setTemporaryFilters((prev) => {
+      const exists = prev.some((f) => getFilterTagKey(f.type, f.value) === key);
+      if (exists) {
+        return prev.filter((f) => getFilterTagKey(f.type, f.value) !== key);
+      }
+      return [...prev, tag];
+    });
+  };
+
+  const handleSelectAllForFacet = (facet: SavedFilterType) => {
+    const hasSavedInFacet = savedFilters.some((f) => f.type === facet);
+    setTemporaryFilters((prev) => prev.filter((f) => f.type !== facet));
+    if (hasSavedInFacet) {
+      showFilterToast(SAVED_FILTER_PROTECTED_MSG);
+    }
+  };
+
+  const sidebarFiltersCount = effectiveFilters.length;
 
   const activeChips = useMemo(() => {
-    const chips: { key: string; label: string; onClear: () => void }[] = [];
+    const chips: { key: string; label: string; isSaved: boolean; onClear: () => void }[] = [];
+
     if (searchQuery.trim()) {
       chips.push({
         key: 'search',
         label: `"${searchQuery.trim()}"`,
+        isSaved: false,
         onClear: () => setSearchQuery('')
       });
     }
+
     if (selectedDateFilter !== 'all' && activeDateRange.isFiltered) {
       chips.push({
         key: 'date',
         label: activeDateRange.exactLabel,
+        isSaved: false,
         onClear: () => {
           setSelectedDateFilter('all');
           setCustomStartDate('');
@@ -397,62 +385,58 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
         }
       });
     }
-    if (selectedCategory !== 'all') {
+
+    for (const tag of effectiveFilters) {
       chips.push({
-        key: 'category',
-        label: selectedCategory,
-        onClear: () => setSelectedCategory('all')
+        key: tag.key,
+        label: tag.label,
+        isSaved: tag.isSaved,
+        onClear: () => {
+          if (tag.isSaved) {
+            showFilterToast(SAVED_FILTER_PROTECTED_MSG);
+            return;
+          }
+          setTemporaryFilters((prev) =>
+            prev.filter((f) => getFilterTagKey(f.type, f.value) !== tag.key)
+          );
+        }
       });
     }
-    if (selectedFaculty !== 'all') {
-      chips.push({
-        key: 'faculty',
-        label: selectedFaculty,
-        onClear: () => setSelectedFaculty('all')
-      });
-    }
-    if (selectedLocation !== 'all') {
-      const locLabel =
-        LOCATION_BUCKETS.find((l) => l.id === selectedLocation)?.label || selectedLocation;
-      chips.push({
-        key: 'location',
-        label: locLabel,
-        onClear: () => setSelectedLocation('all')
-      });
-    }
-    if (priceFilter !== 'all') {
-      chips.push({
-        key: 'price',
-        label: priceFilter === 'free' ? 'Free only' : 'Paid only',
-        onClear: () => setPriceFilter('all')
-      });
-    }
+
     return chips;
-  }, [
-    searchQuery,
-    selectedDateFilter,
-    activeDateRange,
-    selectedCategory,
-    selectedFaculty,
-    selectedLocation,
-    priceFilter
-  ]);
+  }, [searchQuery, selectedDateFilter, activeDateRange, effectiveFilters]);
 
   const hasAnyFilterOrSearch = activeChips.length > 0;
+  const hasTemporarySidebarFilters = temporaryFilters.length > 0;
 
   const resetSidebarFilters = () => {
-    setSelectedCategory('all');
-    setSelectedFaculty('all');
-    setSelectedLocation('all');
-    setPriceFilter('all');
+    setTemporaryFilters([]);
+    if (savedFilters.length > 0) {
+      showFilterToast(
+        'Temporary filters cleared. Saved filters stay active — manage them in Profile > Saved Filters.'
+      );
+    }
   };
 
   const resetAllFilters = () => {
+    const hadTemporary =
+      Boolean(searchQuery.trim()) ||
+      selectedDateFilter !== 'all' ||
+      temporaryFilters.length > 0;
+
     setSearchQuery('');
-    resetSidebarFilters();
+    setTemporaryFilters([]);
     setSelectedDateFilter('all');
     setCustomStartDate('');
     setCustomEndDate('');
+
+    if (savedFilters.length > 0) {
+      showFilterToast(
+        hadTemporary
+          ? 'Cleared temporary filters. Saved filters stay active — go to Profile > Saved Filters to change them.'
+          : SAVED_FILTER_PROTECTED_MSG
+      );
+    }
   };
 
   const displayedEvents = useMemo(() => {
@@ -482,10 +466,11 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
 
   const FilterSectionOption: React.FC<{
     active: boolean;
+    isSaved?: boolean;
     label: string;
     count: number;
     onClick: () => void;
-  }> = ({ active, label, count, onClick }) => (
+  }> = ({ active, isSaved, label, count, onClick }) => (
     <button
       type="button"
       onClick={onClick}
@@ -496,11 +481,15 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
       }`}
     >
       <span className="flex items-center gap-2 min-w-0">
-        <span
-          className={`w-2 h-2 rounded-full shrink-0 transition-colors ${
-            active ? 'bg-accent ring-2 ring-accent/30' : 'bg-line'
-          }`}
-        />
+        {isSaved ? (
+          <Pin className="w-3 h-3 text-accent-text shrink-0" />
+        ) : (
+          <span
+            className={`w-2 h-2 rounded-full shrink-0 transition-colors ${
+              active ? 'bg-accent ring-2 ring-accent/30' : 'bg-line'
+            }`}
+          />
+        )}
         <span className="truncate">{label}</span>
       </span>
       <span className="text-[11px] tabular-nums shrink-0 opacity-80">{count}</span>
@@ -510,7 +499,14 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
   const renderAccordionSection = (
     key: SectionKey,
     title: string,
-    options: { id: string; label: string; count: number; active: boolean; onClick: () => void }[],
+    options: {
+      id: string;
+      label: string;
+      count: number;
+      active: boolean;
+      isSaved?: boolean;
+      onClick: () => void;
+    }[],
     withTopDivider: boolean
   ) => {
     const isCollapsed = Boolean(collapsedSections[key]);
@@ -540,6 +536,7 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
               <FilterSectionOption
                 key={opt.id}
                 active={opt.active}
+                isSaved={opt.isSaved}
                 label={opt.label}
                 count={opt.count}
                 onClick={opt.onClick}
@@ -561,21 +558,30 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
   };
 
   const renderFilterGroups = () => {
+    const hasCategoryFilter = effectiveFilters.some((f) => f.type === 'category');
+    const hasFacultyFilter = effectiveFilters.some((f) => f.type === 'faculty');
+    const hasLocationFilter = effectiveFilters.some((f) => f.type === 'location');
+    const hasPriceFilter = effectiveFilters.some((f) => f.type === 'price');
+
     const categoryOptions = [
       {
         id: 'all',
         label: 'All categories',
         count: categoryCounts.all,
-        active: selectedCategory === 'all',
-        onClick: () => setSelectedCategory('all')
+        active: !hasCategoryFilter,
+        onClick: () => handleSelectAllForFacet('category')
       },
-      ...EVENT_CATEGORIES.map((cat) => ({
-        id: cat,
-        label: cat,
-        count: categoryCounts[cat] ?? 0,
-        active: selectedCategory === cat,
-        onClick: () => setSelectedCategory(cat)
-      }))
+      ...EVENT_CATEGORIES.map((cat) => {
+        const key = getFilterTagKey('category', cat);
+        return {
+          id: cat,
+          label: cat,
+          count: categoryCounts[cat] ?? 0,
+          active: effectiveKeySet.has(key),
+          isSaved: savedKeySet.has(key),
+          onClick: () => handleToggleSidebarTag({ type: 'category', value: cat, label: cat })
+        };
+      })
     ];
 
     const facultyOptions = [
@@ -583,47 +589,69 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
         id: 'all',
         label: 'All Faculties',
         count: facultyCounts.all,
-        active: selectedFaculty === 'all',
-        onClick: () => setSelectedFaculty('all')
+        active: !hasFacultyFilter,
+        onClick: () => handleSelectAllForFacet('faculty')
       },
-      ...UW_FACULTIES.map((fac) => ({
-        id: fac,
-        label: fac,
-        count: facultyCounts[fac] ?? 0,
-        active: selectedFaculty === fac,
-        onClick: () => setSelectedFaculty(fac)
-      }))
+      ...UW_FACULTIES.map((fac) => {
+        const key = getFilterTagKey('faculty', fac);
+        return {
+          id: fac,
+          label: fac,
+          count: facultyCounts[fac] ?? 0,
+          active: effectiveKeySet.has(key),
+          isSaved: savedKeySet.has(key),
+          onClick: () => handleToggleSidebarTag({ type: 'faculty', value: fac, label: fac })
+        };
+      })
     ];
 
-    const locationOptions = LOCATION_BUCKETS.map((loc) => ({
-      id: loc.id,
-      label: loc.label,
-      count: locationCounts[loc.id] ?? 0,
-      active: selectedLocation === loc.id,
-      onClick: () => setSelectedLocation(loc.id)
-    }));
+    const locationOptions = LOCATION_BUCKETS.map((loc) => {
+      if (loc.id === 'all') {
+        return {
+          id: loc.id,
+          label: loc.label,
+          count: locationCounts[loc.id] ?? 0,
+          active: !hasLocationFilter,
+          onClick: () => handleSelectAllForFacet('location')
+        };
+      }
+      const key = getFilterTagKey('location', loc.id);
+      return {
+        id: loc.id,
+        label: loc.label,
+        count: locationCounts[loc.id] ?? 0,
+        active: effectiveKeySet.has(key),
+        isSaved: savedKeySet.has(key),
+        onClick: () =>
+          handleToggleSidebarTag({ type: 'location', value: loc.id, label: loc.label })
+      };
+    });
 
     const priceOptions = [
       {
         id: 'all',
         label: 'All prices',
         count: priceCounts.all,
-        active: priceFilter === 'all',
-        onClick: () => setPriceFilter('all')
+        active: !hasPriceFilter,
+        onClick: () => handleSelectAllForFacet('price')
       },
       {
         id: 'free',
         label: 'Free',
         count: priceCounts.free,
-        active: priceFilter === 'free',
-        onClick: () => setPriceFilter('free')
+        active: effectiveKeySet.has(getFilterTagKey('price', 'free')),
+        isSaved: savedKeySet.has(getFilterTagKey('price', 'free')),
+        onClick: () =>
+          handleToggleSidebarTag({ type: 'price', value: 'free', label: 'Free only' })
       },
       {
         id: 'paid',
         label: 'Paid',
         count: priceCounts.paid,
-        active: priceFilter === 'paid',
-        onClick: () => setPriceFilter('paid')
+        active: effectiveKeySet.has(getFilterTagKey('price', 'paid')),
+        isSaved: savedKeySet.has(getFilterTagKey('price', 'paid')),
+        onClick: () =>
+          handleToggleSidebarTag({ type: 'price', value: 'paid', label: 'Paid only' })
       }
     ];
 
@@ -638,7 +666,31 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {/* Protected Saved Filter Toast */}
+      {filterToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 bg-surface text-ink text-xs font-semibold rounded-2xl shadow-lift border border-accent flex items-center gap-2.5 max-w-[92vw]"
+        >
+          <Pin className="w-3.5 h-3.5 text-accent-text shrink-0" />
+          <span>{filterToast}</span>
+          {onOpenProfile && (
+            <button
+              type="button"
+              onClick={() => {
+                setFilterToast('');
+                onOpenProfile();
+              }}
+              className="text-accent-text hover:underline font-bold whitespace-nowrap cursor-pointer"
+            >
+              Open Profile
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
@@ -717,7 +769,7 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
               <div className="px-5 pt-5 pb-3 border-b border-line flex items-center justify-between gap-2 shrink-0">
                 <h2 className="font-display text-base font-bold text-ink">Filters</h2>
                 <div className="flex items-center gap-2">
-                  {sidebarFiltersCount > 0 && (
+                  {hasTemporarySidebarFilters && (
                     <button
                       type="button"
                       onClick={resetSidebarFilters}
@@ -939,7 +991,7 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
             </div>
           </div>
 
-          {/* Active-Filter Chips + Clear All */}
+          {/* Active-Filter Chips (Saved + Temporary union) + Clear All */}
           {hasAnyFilterOrSearch && (
             <div className="flex flex-wrap items-center gap-2">
               {activeChips.map((chip) => (
@@ -947,8 +999,23 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
                   key={chip.key}
                   type="button"
                   onClick={chip.onClear}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-accent-soft border border-accent/40 text-xs font-semibold text-ink hover:bg-accent/25 transition-colors cursor-pointer"
+                  title={
+                    chip.isSaved
+                      ? 'Saved filter — manage in Profile > Saved Filters'
+                      : `Remove ${chip.label}`
+                  }
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold text-ink transition-colors cursor-pointer ${
+                    chip.isSaved
+                      ? 'bg-accent-soft border-accent text-ink hover:bg-accent/25'
+                      : 'bg-accent-soft/75 border-accent/40 text-ink hover:bg-accent/25'
+                  }`}
                 >
+                  {chip.isSaved && (
+                    <Pin
+                      className="w-3 h-3 text-accent-text shrink-0"
+                      aria-label="Saved filter"
+                    />
+                  )}
                   <span>{chip.label}</span>
                   <X className="w-3 h-3 text-accent-text" />
                 </button>
@@ -976,6 +1043,8 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
                 <p className="text-sm text-muted max-w-md mx-auto leading-relaxed">
                   {selectedDateFilter !== 'all'
                     ? 'Try another date window or clear your active filters to see upcoming Waterloo events.'
+                    : savedFilters.length > 0
+                    ? 'Your saved filters are active. Clear temporary filters or adjust your defaults in Profile > Saved Filters.'
                     : 'Try clearing your search or filters to see what else is buzzing on campus.'}
                 </p>
               </div>
@@ -988,6 +1057,15 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
                   >
                     Clear filters
                   </button>
+                  {savedFilters.length > 0 && onOpenProfile && (
+                    <button
+                      type="button"
+                      onClick={onOpenProfile}
+                      className="px-5 py-2.5 border border-line bg-canvas hover:bg-surface-soft text-ink text-xs font-semibold rounded-2xl transition-colors cursor-pointer"
+                    >
+                      Manage Saved Filters
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1040,7 +1118,7 @@ export const FeedTab: React.FC<FeedTabProps> = ({ onNavigateToMessages }) => {
               <button
                 type="button"
                 onClick={resetSidebarFilters}
-                disabled={sidebarFiltersCount === 0}
+                disabled={!hasTemporarySidebarFilters}
                 className="px-4 py-3 rounded-2xl border border-line bg-canvas text-ink text-xs font-semibold cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 Reset

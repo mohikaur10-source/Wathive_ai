@@ -20,7 +20,9 @@ import {
   StudentDiscount,
   AdminAuditLog,
   RemovedChatReason,
-  RemovedChatRecord
+  RemovedChatRecord,
+  SocialBatteryTag,
+  EventFilterTag
 } from '../types';
 import {
   INITIAL_USER,
@@ -42,7 +44,13 @@ import {
   INITIAL_STUDENT_DISCOUNTS,
   INITIAL_AUDIT_LOGS
 } from '../data/mockData';
-import { calculateCompatibility, DEFAULT_ALEX_QUIZ } from '../utils/compatibilityEngine';
+import {
+  calculateCompatibility,
+  DEFAULT_ALEX_QUIZ,
+  computeBuddyArchetype,
+  normalizeQuizProfile
+} from '../utils/compatibilityEngine';
+import { getFilterTagKey } from '../utils/eventFilters';
 import { runTwoHourRefreshCycle, detectDuplicateEvents } from '../utils/eventAggregationEngine';
 import { toWaterlooUtcIso, getTorontoNow, TorontoNowInfo } from '../utils/timeZone';
 import { isEventPast } from '../utils/eventLifecycle';
@@ -89,6 +97,8 @@ interface AppContextType {
   allAttendees: Record<string, AttendeeProfile>;
   dailyBuddyRequestsCount: number;
   maxDailyRequests: number;
+  savedFilters: EventFilterTag[];
+  eventSocialBattery: Record<string, SocialBatteryTag>;
 
   // Actions
   loginDemoUser: (asNewUser?: boolean) => void;
@@ -96,6 +106,11 @@ interface AppContextType {
   updateOnboardingProfile: (data: Partial<UserProfile>) => void;
   completeOnboardingPreferences: (prefs: UserPreferences) => void;
   updatePersonalityQuiz: (quiz: PersonalityQuizProfile) => void;
+  completeQuizAndPopulateMatches: (quiz: PersonalityQuizProfile) => void;
+  toggleSavedFilter: (tag: EventFilterTag) => void;
+  removeSavedFilter: (tag: EventFilterTag) => void;
+  clearSavedFilters: () => void;
+  setEventSocialBattery: (eventId: string, battery: SocialBatteryTag) => void;
   verifyUWStudent: (email: string) => { success: boolean; message: string };
   updateProfile: (data: Partial<UserProfile>) => void;
   updatePreferences: (prefs: UserPreferences) => void;
@@ -149,6 +164,7 @@ interface AppContextType {
 }
 
 const STORAGE_KEY = 'wathive_app_state_v16';
+const SAVED_FILTERS_STORAGE_KEY = 'wathive_saved_filters_v1';
 const MAX_DAILY_REQUESTS = 5;
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -199,13 +215,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (initialCached?.user === undefined) return INITIAL_USER;
     if (initialCached.user === null) return null;
     const cachedUser = initialCached.user as UserProfile;
+    const normalizedQuiz = normalizeQuizProfile(cachedUser.personalityQuiz);
+    const baseUser: UserProfile = {
+      ...cachedUser,
+      personalityQuiz: normalizedQuiz
+    };
     if (
-      cachedUser.id === 'user_alex_chen' &&
-      (!cachedUser.avatar || cachedUser.avatar.includes('unsplash.com'))
+      baseUser.id === 'user_alex_chen' &&
+      (!baseUser.avatar || baseUser.avatar.includes('unsplash.com'))
     ) {
-      return { ...cachedUser, avatar: INITIAL_USER.avatar };
+      return { ...baseUser, avatar: INITIAL_USER.avatar };
     }
-    return cachedUser;
+    return baseUser;
   });
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(
     initialCached?.isLoggedIn !== undefined ? initialCached.isLoggedIn : true
@@ -233,6 +254,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [eventBuddySettings, setEventBuddySettings] = useState<Record<string, BuddyPrivacySettings>>(
     initialCached?.eventBuddySettings || {}
   );
+  const [eventSocialBattery, setEventSocialBatteryMap] = useState<Record<string, SocialBatteryTag>>(
+    initialCached?.eventSocialBattery || {}
+  );
+  const [savedFilters, setSavedFilters] = useState<EventFilterTag[]>(() => {
+    try {
+      const dedicated = localStorage.getItem(SAVED_FILTERS_STORAGE_KEY);
+      if (dedicated) {
+        const parsed = JSON.parse(dedicated);
+        if (Array.isArray(parsed)) return parsed as EventFilterTag[];
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return Array.isArray(initialCached?.savedFilters) ? initialCached.savedFilters : [];
+  });
 
   const [chatStore, setChatStore] = useState<ChatStateSnapshot>(() => {
     const rawBlocked: string[] = Array.isArray(initialCached?.blockedUserIds)
@@ -341,6 +377,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       attendingEventIds,
       attendeeVisibility,
       eventBuddySettings,
+      eventSocialBattery,
+      savedFilters,
       connectionRequests: snapshot.connectionRequests,
       conversations: snapshot.conversations,
       chatMessages: snapshot.chatMessages,
@@ -368,6 +406,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       attendingEventIds,
       attendeeVisibility,
       eventBuddySettings,
+      eventSocialBattery,
+      savedFilters,
       reportedUserIds,
       reportedEventIds,
       reportsList,
@@ -383,6 +423,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       auditLogs
     ]
   );
+
+  // Persist savedFilters under a dedicated key as well so they always survive reloads cleanly
+  useEffect(() => {
+    try {
+      localStorage.setItem(SAVED_FILTERS_STORAGE_KEY, JSON.stringify(savedFilters));
+    } catch (e) {
+      console.error('Error saving default filters:', e);
+    }
+  }, [savedFilters]);
 
   // Save user preferences & buddy state to localStorage (never persist events list)
   useEffect(() => {
@@ -564,14 +613,156 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updatePersonalityQuiz = (quiz: PersonalityQuizProfile) => {
     if (!user) return;
+    const normalizedQuiz: PersonalityQuizProfile = {
+      ...quiz,
+      completed: true,
+      archetype: quiz.archetype || computeBuddyArchetype(quiz.answers),
+      preferenceBubbles: quiz.preferenceBubbles || [],
+      updatedAt: new Date().toISOString()
+    };
     setUser({
       ...user,
-      personalityQuiz: {
-        ...quiz,
-        completed: true,
-        updatedAt: new Date().toISOString()
-      }
+      personalityQuiz: normalizedQuiz
     });
+  };
+
+  const completeQuizAndPopulateMatches = (quiz: PersonalityQuizProfile) => {
+    if (!user) return;
+    const completedQuiz: PersonalityQuizProfile = {
+      ...quiz,
+      completed: true,
+      archetype: quiz.archetype || computeBuddyArchetype(quiz.answers),
+      preferenceBubbles: quiz.preferenceBubbles || [],
+      updatedAt: new Date().toISOString()
+    };
+
+    const updatedUser: UserProfile = {
+      ...user,
+      personalityQuiz: completedQuiz
+    };
+    setUser(updatedUser);
+
+    // Pre-populate mock Match Invitations based on new answers + preference filters
+    // and refresh Icebreaker Hooks on active conversations without resurrecting removed/blocked chats.
+    const fallbackEvents = [
+      { id: 'wusa_247403', title: 'Campus Social Mixer @ SLC', date: torontoNow.dateStr },
+      { id: 'wusa_250173', title: 'Waterloo Student Night Market', date: torontoNow.dateStr },
+      { id: 'wusa_249683', title: 'Trivia & Board Games Night', date: torontoNow.dateStr }
+    ];
+    const candidateEvents =
+      upcomingEvents.length > 0
+        ? upcomingEvents.filter((e) => !e.isResearchStudy && e.status === 'published')
+        : fallbackEvents;
+
+    updateChatStoreAndPersist((prev) => {
+      // Refresh Icebreaker Hooks on existing conversations
+      const updatedConversations = prev.conversations.map((conv) => {
+        const partnerProfile = SAMPLE_ATTENDEES[conv.partner.id] || conv.partner;
+        const compat = calculateCompatibility(
+          completedQuiz,
+          partnerProfile.personalityQuiz,
+          updatedUser,
+          partnerProfile,
+          eventSocialBattery[conv.eventId] || conv.socialBattery,
+          conv.eventId,
+          conv.eventTitle
+        );
+        return {
+          ...conv,
+          partner: partnerProfile,
+          icebreakerPill: compat.icebreakerPill,
+          icebreakerBanner: compat.icebreakerBanner,
+          icebreakerQuestion: compat.icebreakerQuestion
+        };
+      });
+
+      const activePartnerIds = new Set(updatedConversations.map((c) => c.partner.id));
+      const candidates = Object.values(SAMPLE_ATTENDEES)
+        .filter((att) => att.id !== updatedUser.id && att.isVerifiedUWStudent)
+        .map((att, idx) => {
+          const ev = candidateEvents[idx % candidateEvents.length] || fallbackEvents[0];
+          const compat = calculateCompatibility(
+            completedQuiz,
+            att.personalityQuiz,
+            updatedUser,
+            att,
+            eventSocialBattery[ev.id],
+            ev.id,
+            ev.title
+          );
+          return { attendee: att, event: ev, compat };
+        })
+        .filter(
+          ({ attendee, event, compat }) =>
+            !compat.filteredOut &&
+            !activePartnerIds.has(attendee.id) &&
+            !isChatRemovedForPair(attendee.id, event.id, prev.removedChats, prev.blockedUserIds)
+        )
+        .sort((a, b) => b.compat.score - a.compat.score)
+        .slice(0, 3);
+
+      // Keep user's non-pending or outgoing requests intact; replace auto-generated pending incoming invitations
+      const preservedRequests = prev.connectionRequests.filter(
+        (r) => !(r.recipientId === updatedUser.id && r.status === 'pending')
+      );
+
+      const freshInvitations: ConnectionRequest[] = candidates.map(({ attendee, event, compat }, idx) => ({
+        id: `req_quiz_${attendee.id}_${Date.now()}_${idx}`,
+        eventId: event.id,
+        eventTitle: event.title,
+        eventDate: event.date,
+        senderId: attendee.id,
+        senderName: attendee.name,
+        senderAvatar: attendee.avatar,
+        senderFaculty: attendee.faculty,
+        senderProgram: attendee.program,
+        senderYear: attendee.year,
+        recipientId: updatedUser.id,
+        recipientName: formatPublicName(updatedUser.name),
+        introMessage: `Hey ${formatPublicName(updatedUser.name)}! Saw we matched on WatHive for ${event.title}. Want to head over together?`,
+        compatibilityScore: compat.score,
+        compatibilityReasons: compat.reasons,
+        icebreakerPill: compat.icebreakerPill,
+        icebreakerBanner: compat.icebreakerBanner,
+        icebreakerQuestion: compat.icebreakerQuestion,
+        socialBattery: attendee.defaultSocialBattery,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      }));
+
+      return {
+        ...prev,
+        conversations: updatedConversations,
+        connectionRequests: [...freshInvitations, ...preservedRequests]
+      };
+    });
+  };
+
+  const toggleSavedFilter = (tag: EventFilterTag) => {
+    const targetKey = getFilterTagKey(tag.type, tag.value);
+    setSavedFilters((prev) => {
+      const exists = prev.some((f) => getFilterTagKey(f.type, f.value) === targetKey);
+      if (exists) {
+        return prev.filter((f) => getFilterTagKey(f.type, f.value) !== targetKey);
+      }
+      return [...prev, tag];
+    });
+  };
+
+  const removeSavedFilter = (tag: EventFilterTag) => {
+    const targetKey = getFilterTagKey(tag.type, tag.value);
+    setSavedFilters((prev) => prev.filter((f) => getFilterTagKey(f.type, f.value) !== targetKey));
+  };
+
+  const clearSavedFilters = () => {
+    setSavedFilters([]);
+  };
+
+  const setEventSocialBattery = (eventId: string, battery: SocialBatteryTag) => {
+    setEventSocialBatteryMap((prev) => ({
+      ...prev,
+      [eventId]: battery
+    }));
   };
 
   const verifyUWStudent = (email: string): { success: boolean; message: string } => {
@@ -729,6 +920,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const attendeeIds = eventAttendeesMap[eventId] || [];
     const matches: SuggestedMatchItem[] = [];
+    const userEventBattery = eventSocialBattery[eventId];
 
     for (const id of attendeeIds) {
       const attendee = SAMPLE_ATTENDEES[id];
@@ -741,9 +933,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           user?.personalityQuiz || DEFAULT_ALEX_QUIZ,
           attendee.personalityQuiz,
           user,
-          attendee
+          attendee,
+          userEventBattery,
+          eventId,
+          event.title
         );
-        matches.push({ attendee, compatibility });
+        if (!compatibility.filteredOut) {
+          matches.push({ attendee, compatibility });
+        }
       }
     }
 
@@ -838,12 +1035,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       shortIntro: ''
     };
 
-    // Calculate real compatibility score
+    // Calculate real weighted compatibility score (40% Quiz, 40% Social Battery, 20% Preferences)
     const compatResult = calculateCompatibility(
       user.personalityQuiz || DEFAULT_ALEX_QUIZ,
       recipient.personalityQuiz,
       user,
-      recipient
+      recipient,
+      eventSocialBattery[eventId],
+      eventId,
+      event.title
     );
 
     const newReq: ConnectionRequest = {
@@ -862,6 +1062,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       introMessage,
       compatibilityScore: compatResult.score,
       compatibilityReasons: compatResult.reasons,
+      icebreakerPill: compatResult.icebreakerPill,
+      icebreakerBanner: compatResult.icebreakerBanner,
+      icebreakerQuestion: compatResult.icebreakerQuestion,
+      socialBattery: eventSocialBattery[eventId],
       status: 'pending',
       createdAt: new Date().toISOString()
     };
@@ -898,7 +1102,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           isReported: false,
           stayConnectedUser: false,
           stayConnectedPartner: false,
-          isChatClosedPostEvent: false
+          isChatClosedPostEvent: false,
+          icebreakerPill: compatResult.icebreakerPill,
+          icebreakerBanner: compatResult.icebreakerBanner,
+          icebreakerQuestion: compatResult.icebreakerQuestion,
+          socialBattery: eventSocialBattery[eventId]
         };
 
         const msgs: ChatMessage[] = [
@@ -969,6 +1177,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isVerifiedUWStudent: true
     };
 
+    const liveCompat = calculateCompatibility(
+      user?.personalityQuiz || DEFAULT_ALEX_QUIZ,
+      partner.personalityQuiz,
+      user,
+      partner,
+      eventSocialBattery[req.eventId] || req.socialBattery,
+      req.eventId,
+      req.eventTitle
+    );
+
+    const icebreakerPill = req.icebreakerPill || liveCompat.icebreakerPill;
+    const icebreakerBanner = req.icebreakerBanner || liveCompat.icebreakerBanner;
+    const icebreakerQuestion = req.icebreakerQuestion || liveCompat.icebreakerQuestion;
+
     updateChatStoreAndPersist((prev) => {
       if (isChatRemovedForPair(partner.id, req.eventId, prev.removedChats, prev.blockedUserIds)) {
         return prev;
@@ -981,20 +1203,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         eventDate: req.eventDate,
         eventLocation: 'Campus Venue',
         partner,
-        lastMessage: req.introMessage || 'Connected to attend together!',
+        lastMessage: req.introMessage || `Icebreaker: ${icebreakerQuestion}`,
         lastMessageTime: 'Just now',
         unreadCount: 0,
         isReported: false,
         stayConnectedUser: false,
         stayConnectedPartner: false,
-        isChatClosedPostEvent: false
+        isChatClosedPostEvent: false,
+        icebreakerPill,
+        icebreakerBanner,
+        icebreakerQuestion,
+        socialBattery: eventSocialBattery[req.eventId] || req.socialBattery
       };
 
       const msgs: ChatMessage[] = [
+        {
+          id: `m_ice_${Date.now()}`,
+          conversationId: convId,
+          senderId: 'system',
+          text: `Icebreaker prompt: ${icebreakerQuestion}`,
+          timestamp: 'Just now'
+        },
         ...(req.introMessage
           ? [
               {
-                id: `m_init_${Date.now()}`,
+                id: `m_init_${Date.now() + 1}`,
                 conversationId: convId,
                 senderId: partner.id,
                 text: req.introMessage,
@@ -1003,7 +1236,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ]
           : []),
         {
-          id: `m_accept_${Date.now()}`,
+          id: `m_accept_${Date.now() + 2}`,
           conversationId: convId,
           senderId: user?.id || 'me',
           text: `Hey ${partner.name}! Excited to check out ${req.eventTitle} together!`,
@@ -1395,6 +1628,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const resetDemoData = () => {
     try {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(SAVED_FILTERS_STORAGE_KEY);
       [
         'wathive_app_state_v7',
         'wathive_app_state_v8',
@@ -1418,6 +1652,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAttendingEventIds(INITIAL_USER_ATTENDING);
     setAttendeeVisibilityMap(INITIAL_USER_VISIBILITY);
     setEventBuddySettings({});
+    setEventSocialBatteryMap({});
+    setSavedFilters([]);
     setChatStore(
       sanitizeChatSnapshot({
         conversations: INITIAL_CONVERSATIONS,
@@ -1553,11 +1789,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         allAttendees: SAMPLE_ATTENDEES,
         dailyBuddyRequestsCount,
         maxDailyRequests: MAX_DAILY_REQUESTS,
+        savedFilters,
+        eventSocialBattery,
         loginDemoUser,
         logout,
         updateOnboardingProfile,
         completeOnboardingPreferences,
         updatePersonalityQuiz,
+        completeQuizAndPopulateMatches,
+        toggleSavedFilter,
+        removeSavedFilter,
+        clearSavedFilters,
+        setEventSocialBattery,
         verifyUWStudent,
         updateProfile,
         updatePreferences,

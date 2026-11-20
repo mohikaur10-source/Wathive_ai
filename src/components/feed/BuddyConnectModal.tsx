@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Send, Sparkles, Building, GraduationCap, MapPin, Shield, AlertCircle } from 'lucide-react';
 import { AttendeeProfile, EventItem } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { calculateCompatibility } from '../../utils/compatibilityEngine';
 
 interface BuddyConnectModalProps {
   isOpen: boolean;
@@ -18,7 +19,7 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
   onClose,
   onSuccess
 }) => {
-  const { user, sendConnectionRequest, dailyBuddyRequestsCount, maxDailyRequests } = useApp();
+  const { user, sendConnectionRequest, dailyBuddyRequestsCount, maxDailyRequests, eventSocialBattery } = useApp();
   const [introMessage, setIntroMessage] = useState(
     "Want to meet at the registration desk?"
   );
@@ -26,6 +27,18 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
   const [error, setError] = useState('');
 
   if (!isOpen || !attendee) return null;
+
+  const compatibility = user
+    ? calculateCompatibility(
+        user.personalityQuiz,
+        attendee.personalityQuiz,
+        user,
+        attendee,
+        eventSocialBattery[event.id],
+        event.id,
+        event.title
+      )
+    : null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -115,16 +128,23 @@ export const BuddyConnectModal: React.FC<BuddyConnectModalProps> = ({
               </div>
             </div>
 
-            {/* Compatibility Badge if personality quiz is present */}
-            {user?.personalityQuiz && attendee.personalityQuiz && (
-              <div className="pt-2 border-t border-line flex items-center justify-between text-xs">
-                <div className="flex items-center gap-1.5 font-bold text-accent-text">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Personality &amp; Interest Match</span>
+            {/* Compatibility Badge & Icebreaker Hook */}
+            {compatibility && (
+              <div className="pt-2 border-t border-line space-y-1.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-bold text-accent-text">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Buddy Compatibility</span>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-accent text-accent-ink font-black text-[11px] shadow-2xs tabular-nums">
+                    {compatibility.score}% match
+                  </span>
                 </div>
-                <span className="px-2 py-0.5 rounded-full bg-accent text-accent-ink font-black text-[11px] shadow-2xs">
-                  High Compatibility
-                </span>
+                {compatibility.icebreakerPill && (
+                  <p className="text-[11px] text-muted">
+                    {compatibility.icebreakerPill}
+                  </p>
+                )}
               </div>
             )}
           </div>

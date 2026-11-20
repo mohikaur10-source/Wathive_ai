@@ -1,238 +1,689 @@
 import {
   PersonalityQuizProfile,
   CompatibilityMatch,
-  SocialEnergy,
-  SocialEnvironment,
-  GroupSizePreference,
+  BuddyQuizAnswers,
+  BuddyPreferenceTag,
+  BuddyArchetype,
+  SocialBatteryTag,
   UserProfile,
   AttendeeProfile
 } from '../types';
 
-export interface QuizOption<T> {
-  value: T;
-  title: string;
-  description: string;
+export type QuizQuestionKey = keyof BuddyQuizAnswers;
+
+export interface GamifiedQuizOption {
+  key: 'A' | 'B' | 'C';
+  label: string;
+  emoji: string;
+  shortTag: string;
+  bannerPhrase: string;
+  conversationPrompt: string;
 }
 
-export const SOCIAL_ENERGY_OPTIONS: QuizOption<SocialEnergy>[] = [
+export interface GamifiedQuizQuestion {
+  id: QuizQuestionKey;
+  stepNumber: number;
+  question: string;
+  options: GamifiedQuizOption[];
+}
+
+export const BUDDY_QUIZ_QUESTIONS: GamifiedQuizQuestion[] = [
   {
-    value: 'introvert',
-    title: 'Introverted / Low-Key',
-    description: 'Recharges solo or in quiet 1-on-1s. Prefers calm spots and thoughtful conversation over noisy crowds.'
+    id: 'q1',
+    stepNumber: 1,
+    question: "Free Friday night. What's your vibe?",
+    options: [
+      {
+        key: 'A',
+        label: 'Big social event',
+        emoji: '🎉',
+        shortTag: 'Big Social Events',
+        bannerPhrase: 'big social events',
+        conversationPrompt: "What's been your favorite big campus event so far?"
+      },
+      {
+        key: 'B',
+        label: 'Chill cafe hangout',
+        emoji: '☕',
+        shortTag: 'Chill Cafe',
+        bannerPhrase: 'chill cafe hangouts',
+        conversationPrompt: "What's your go-to coffee or study cafe spot around Waterloo?"
+      }
+    ]
   },
   {
-    value: 'ambivert',
-    title: 'Ambivert / Balanced',
-    description: 'Enjoys vibrant campus gatherings, but appreciates stepping aside for smaller chats and recharging.'
+    id: 'q2',
+    stepNumber: 2,
+    question: "You're at a new club event. You'd rather...",
+    options: [
+      {
+        key: 'A',
+        label: 'Meet lots of new people',
+        emoji: '🤝',
+        shortTag: 'Meeting New People',
+        bannerPhrase: 'meeting lots of new faces',
+        conversationPrompt: 'Are you trying to branch out into new clubs this term?'
+      },
+      {
+        key: 'B',
+        label: 'Get to know 1–2 people well',
+        emoji: '💬',
+        shortTag: '1–2 Real Chats',
+        bannerPhrase: 'small groups & deeper 1–2 person chats',
+        conversationPrompt: "What's something you're super into outside of classes right now?"
+      }
+    ]
   },
   {
-    value: 'extrovert',
-    title: 'Extroverted / High Energy',
-    description: 'Thrives in buzzing crowds, loves meeting lots of new faces, and brings lively social energy.'
+    id: 'q3',
+    stepNumber: 3,
+    question: 'What role do you naturally play in a group?',
+    options: [
+      {
+        key: 'A',
+        label: 'The Planner (organizes the details)',
+        emoji: '🗓️',
+        shortTag: 'The Planner',
+        bannerPhrase: 'being the group planner',
+        conversationPrompt: 'Want to pick a spot to meet 10 minutes before it starts?'
+      },
+      {
+        key: 'B',
+        label: 'The Connector (introduces everyone)',
+        emoji: '✨',
+        shortTag: 'The Connector',
+        bannerPhrase: 'bringing people together',
+        conversationPrompt: 'Do you know anyone else heading to this event too?'
+      },
+      {
+        key: 'C',
+        label: 'The Chill One (goes with the flow)',
+        emoji: '🌿',
+        shortTag: 'Go-with-the-Flow',
+        bannerPhrase: 'keeping things easygoing and going with the flow',
+        conversationPrompt: 'No pressure on timing — want to just wing it and explore together?'
+      }
+    ]
+  },
+  {
+    id: 'q4',
+    stepNumber: 4,
+    question: "Your Saturday suddenly clears up. What's the move?",
+    options: [
+      {
+        key: 'A',
+        label: 'Try a completely new activity',
+        emoji: '🧭',
+        shortTag: 'Trying New Things',
+        bannerPhrase: 'trying new activities',
+        conversationPrompt: "What's something new on campus you've been wanting to try?"
+      },
+      {
+        key: 'B',
+        label: 'Stick to a favorite hobby or hangout',
+        emoji: '🎧',
+        shortTag: 'Favorite Hobbies',
+        bannerPhrase: 'favorite cozy hobbies',
+        conversationPrompt: "What's your comfort weekend hobby when you finally get free time?"
+      },
+      {
+        key: 'C',
+        label: 'Hit the gym or play sports',
+        emoji: '🏀',
+        shortTag: 'Gym & Sports',
+        bannerPhrase: 'staying active & playing sports',
+        conversationPrompt: 'Do you play any intramurals or hit PAC/CIF during the week?'
+      }
+    ]
+  },
+  {
+    id: 'q5',
+    stepNumber: 5,
+    question: 'An event gets announced for tonight. You...',
+    options: [
+      {
+        key: 'A',
+        label: 'Decide on the spot',
+        emoji: '⚡',
+        shortTag: 'Spontaneous Plans',
+        bannerPhrase: 'spontaneous last-minute plans',
+        conversationPrompt: "What's the best last-minute campus plan you've ever said yes to?"
+      },
+      {
+        key: 'B',
+        label: 'Prefer planning ahead',
+        emoji: '📌',
+        shortTag: 'Planning Ahead',
+        bannerPhrase: 'planning ahead',
+        conversationPrompt: 'Are there any other events on your radar for this week?'
+      }
+    ]
+  },
+  {
+    id: 'q6',
+    stepNumber: 6,
+    question: "In a new conversation, you're usually the...",
+    options: [
+      {
+        key: 'A',
+        label: 'Talker (keeps the energy going)',
+        emoji: '🗣️',
+        shortTag: 'High-Energy Talker',
+        bannerPhrase: 'keeping the conversation flowing',
+        conversationPrompt: "What's been the highlight of your week so far?"
+      },
+      {
+        key: 'B',
+        label: 'Listener (asks questions & vibes)',
+        emoji: '👂',
+        shortTag: 'Thoughtful Listener',
+        bannerPhrase: 'thoughtful low-pressure conversation',
+        conversationPrompt: 'What made you want to check out this event?'
+      }
+    ]
+  },
+  {
+    id: 'q7',
+    stepNumber: 7,
+    question: 'Your ideal event buddy is someone who...',
+    options: [
+      {
+        key: 'A',
+        label: 'Pushes me to try new things',
+        emoji: '🚀',
+        shortTag: 'Adventure Buddy',
+        bannerPhrase: 'pushing each other to try new things',
+        conversationPrompt: "What's one thing at this event you definitely want to check out?"
+      },
+      {
+        key: 'B',
+        label: 'Matches my comfort level',
+        emoji: '🫶',
+        shortTag: 'Comfort-Zone Buddy',
+        bannerPhrase: 'matching each other’s comfort level',
+        conversationPrompt: 'Want to walk in together so it feels less awkward at the start?'
+      }
+    ]
+  },
+  {
+    id: 'q8',
+    stepNumber: 8,
+    question: 'Pick your peak energy window:',
+    options: [
+      {
+        key: 'A',
+        label: 'Morning coffee & a walk',
+        emoji: '🌅',
+        shortTag: 'Morning Coffee',
+        bannerPhrase: 'morning coffee & campus walks',
+        conversationPrompt: 'Favorite coffee spot before morning lectures?'
+      },
+      {
+        key: 'B',
+        label: 'Midnight shawarma & late-night hangs',
+        emoji: '🌯',
+        shortTag: 'Midnight Shawarma',
+        bannerPhrase: 'midnight shawarma & late-night hangs',
+        conversationPrompt: 'Important Waterloo question: Lazeez, Osmow’s, or Shawerma Plus?'
+      }
+    ]
   }
 ];
 
-export const SOCIAL_ENVIRONMENT_OPTIONS: QuizOption<SocialEnvironment>[] = [
+export const BUDDY_PREFERENCE_BUBBLES: BuddyPreferenceTag[] = [
+  'Women only',
+  'Men only',
+  'Group match (3–4 people)',
+  'Same faculty',
+  'Outside my faculty',
+  'Same year',
+  'Alcohol-free hangouts',
+  'Strictly platonic',
+  'Study-focused',
+  'Punctual / No flakes',
+  'Lives on campus',
+  'Commuter-friendly'
+];
+
+export interface SocialBatteryOption {
+  tag: SocialBatteryTag;
+  emoji: string;
+  subtitle: string;
+}
+
+export const SOCIAL_BATTERY_OPTIONS: SocialBatteryOption[] = [
   {
-    value: 'cozy_relaxed',
-    title: 'Cozy & Relaxed',
-    description: 'Quiet coffee shops, library lounges, art corners, and low-decibel casual spaces.'
+    tag: 'Hyped & Chatty',
+    emoji: '⚡',
+    subtitle: 'Ready to mingle, joke around, and soak up the vibe'
   },
   {
-    value: 'interactive_workshop',
-    title: 'Collaborative & Structured',
-    description: 'Tech build sprints, design jams, panels, and workshops with clear goals.'
+    tag: 'Chill & Observing',
+    emoji: '☕',
+    subtitle: 'Low-key hanging out, taking it in at an easy pace'
   },
   {
-    value: 'lively_vibrant',
-    title: 'Bustling & High Energy',
-    description: 'Night markets, food festivals, club showcases, and social mixers under the lights.'
+    tag: 'Strictly Networking',
+    emoji: '💼',
+    subtitle: 'Focused on meeting people, panels, and career chats'
   },
   {
-    value: 'active_movement',
-    title: 'Active & Recreational',
-    description: 'Recreational volleyball, gym drop-ins, outdoor planting, and campus walking tours.'
+    tag: "Just don't want to walk alone",
+    emoji: '🚶',
+    subtitle: 'Friendly company walking in — zero small-talk pressure'
   }
 ];
 
-export const GROUP_SIZE_OPTIONS: QuizOption<GroupSizePreference>[] = [
-  {
-    value: 'duo',
-    title: '1-on-1 Buddy Duo',
-    description: 'Just two of us walking in and experiencing the event together.'
-  },
-  {
-    value: 'small_pod',
-    title: 'Small Pod (3–4 students)',
-    description: 'A cozy small crew to explore stalls and sit together.'
-  },
-  {
-    value: 'larger_group',
-    title: 'Larger Circle (5+)',
-    description: 'The more the merrier! Eager to mingle with a bigger group.'
-  },
-  {
-    value: 'flexible',
-    title: 'Flexible with Any Size',
-    description: 'Happy with a 1-on-1 buddy or joining a larger group of attendees.'
-  }
-];
-
-export const AVAILABLE_HOBBIES: string[] = [
-  'Tech & Coding',
-  'Foodie & Cafes',
-  'Board Games & Trivia',
-  'Gaming & Esports',
-  'Running & Fitness',
-  'Anime & Cinema',
-  'Arts & Crafts',
-  'Music & Concerts',
-  'Sustainability & Nature',
-  'Reading & Writing',
-  'Entrepreneurship',
-  'Racquet Sports & Intramurals'
-];
-
-export const AVAILABLE_EXPERIENCE_TYPES: string[] = [
-  'Casual Conversations',
-  'Hands-on Building',
-  'Exploring Food Stalls',
-  'Academic Deep Dives',
-  'Cheering / Sports',
-  'Chill Observation',
-  'Networking & Career Prep',
-  'Creative Making'
-];
-
-export const DEFAULT_ALEX_QUIZ: PersonalityQuizProfile = {
-  completed: true,
-  socialEnergy: 'introvert',
-  socialEnvironment: 'cozy_relaxed',
-  hobbies: ['Tech & Coding', 'Foodie & Cafes', 'Board Games & Trivia', 'Running & Fitness'],
-  groupSize: 'duo',
-  experienceTypes: ['Casual Conversations', 'Hands-on Building', 'Exploring Food Stalls']
+export const DEFAULT_ALEX_ANSWERS: BuddyQuizAnswers = {
+  q1: 'B', // Chill cafe hangout
+  q2: 'B', // Get to know 1-2 people well
+  q3: 'C', // The Chill One
+  q4: 'A', // Try a completely new activity
+  q5: 'B', // Prefer planning ahead
+  q6: 'B', // Listener
+  q7: 'B', // Matches my comfort level
+  q8: 'B'  // Midnight shawarma & late-night hangs
 };
 
-/**
- * Calculates a transparent, explainable compatibility score between two students.
- * Explains *why* two students were matched based on mutual survey answers.
- */
-export function calculateCompatibility(
-  userQuiz?: PersonalityQuizProfile,
-  partnerQuiz?: PersonalityQuizProfile,
-  userProfile?: UserProfile | null,
-  partnerProfile?: AttendeeProfile | null
-): CompatibilityMatch {
-  // If either has not completed the quiz, provide a warm baseline score with basic profile overlap
-  if (!userQuiz || !partnerQuiz || !userQuiz.completed || !partnerQuiz.completed) {
-    const reasons: string[] = [
-      'Both verified University of Waterloo students',
-      'Attending the same campus event'
-    ];
-
-    if (userProfile?.faculty && partnerProfile?.faculty && userProfile.faculty === partnerProfile.faculty) {
-      reasons.push(`Shared Faculty of ${userProfile.faculty}`);
-    }
-
+export function computeBuddyArchetype(answers?: BuddyQuizAnswers): BuddyArchetype {
+  if (!answers) {
     return {
-      score: 75,
-      overallVibe: 'Good Match',
-      reasons,
-      sharedHobbies: [],
-      sharedExperienceTypes: [],
-      socialEnergyAlignment: 'Social style open',
-      environmentAlignment: 'Atmosphere open',
-      groupAlignment: 'Open to connecting'
+      id: 'campus_explorer',
+      title: 'Curious Campus Explorer',
+      emoji: '🐝',
+      summary: 'Open to meeting friendly Waterloo students at their own pace.'
     };
   }
 
-  let score = 50;
+  const extroScore =
+    (answers.q1 === 'A' ? 1 : 0) +
+    (answers.q2 === 'A' ? 1 : 0) +
+    (answers.q6 === 'A' ? 1 : 0);
+
+  if (answers.q8 === 'B' && answers.q1 === 'B') {
+    return {
+      id: 'midnight_cafe_wanderer',
+      title: 'Midnight Shawarma & Chill',
+      emoji: '🌯',
+      summary: 'Low-pressure vibes, late-night Plaza runs, and real 1-on-1 conversations.'
+    };
+  }
+
+  if (answers.q4 === 'C') {
+    return {
+      id: 'active_warrior',
+      title: 'Active Adventure Buddy',
+      emoji: '🏃',
+      summary: 'Down for intramurals, spontaneous campus moves, and high-momentum hangs.'
+    };
+  }
+
+  if (answers.q3 === 'A' && answers.q5 === 'B') {
+    return {
+      id: 'master_planner',
+      title: 'Master Event Planner',
+      emoji: '🗓️',
+      summary: 'Always knows the meetup spot, shows up on time, and makes events effortless.'
+    };
+  }
+
+  if (answers.q3 === 'B' || extroScore >= 3) {
+    return {
+      id: 'hive_connector',
+      title: 'The Hive Connector',
+      emoji: '✨',
+      summary: 'Brings warm social energy and makes everyone in the room feel welcome.'
+    };
+  }
+
+  if (answers.q4 === 'A' && answers.q7 === 'A') {
+    return {
+      id: 'spontaneous_catalyst',
+      title: 'Spontaneous Explorer',
+      emoji: '🧭',
+      summary: 'Loves saying yes to new clubs, fresh experiences, and campus discoveries.'
+    };
+  }
+
+  if (answers.q8 === 'A') {
+    return {
+      id: 'morning_coffee_pal',
+      title: 'Morning Coffee Strategist',
+      emoji: '☕',
+      summary: 'Sunny campus walks, iced lattes, and easygoing conversations.'
+    };
+  }
+
+  return {
+    id: 'cozy_conversationalist',
+    title: 'Cozy Cafe Companion',
+    emoji: '🌿',
+    summary: 'Relaxed, thoughtful, and great company for walking into events stress-free.'
+  };
+}
+
+export const DEFAULT_ALEX_QUIZ: PersonalityQuizProfile = {
+  completed: true,
+  answers: DEFAULT_ALEX_ANSWERS,
+  preferenceBubbles: ['Strictly platonic', 'Punctual / No flakes'],
+  archetype: computeBuddyArchetype(DEFAULT_ALEX_ANSWERS)
+};
+
+/**
+ * Safely normalizes any stored/legacy quiz profile into the new 8-question format.
+ */
+export function normalizeQuizProfile(quiz?: PersonalityQuizProfile): PersonalityQuizProfile | undefined {
+  if (!quiz) return undefined;
+  if (quiz.answers && quiz.answers.q1 && quiz.answers.q8) {
+    return {
+      ...quiz,
+      preferenceBubbles: Array.isArray(quiz.preferenceBubbles) ? quiz.preferenceBubbles : [],
+      archetype: quiz.archetype || computeBuddyArchetype(quiz.answers)
+    };
+  }
+  if (!quiz.completed) {
+    return {
+      completed: false,
+      preferenceBubbles: Array.isArray(quiz.preferenceBubbles) ? quiz.preferenceBubbles : []
+    };
+  }
+  // Migrate legacy quiz seamlessly to valid answers
+  const migratedAnswers: BuddyQuizAnswers = {
+    q1: quiz.socialEnergy === 'extrovert' ? 'A' : 'B',
+    q2: quiz.groupSize === 'larger_group' ? 'A' : 'B',
+    q3: quiz.socialEnvironment === 'interactive_workshop' ? 'A' : quiz.socialEnergy === 'extrovert' ? 'B' : 'C',
+    q4: quiz.socialEnvironment === 'active_movement' ? 'C' : quiz.socialEnvironment === 'lively_vibrant' ? 'A' : 'B',
+    q5: quiz.socialEnergy === 'extrovert' ? 'A' : 'B',
+    q6: quiz.socialEnergy === 'introvert' ? 'B' : 'A',
+    q7: quiz.socialEnergy === 'extrovert' ? 'A' : 'B',
+    q8: quiz.socialEnvironment === 'cozy_relaxed' ? 'B' : 'A'
+  };
+  return {
+    completed: true,
+    answers: migratedAnswers,
+    preferenceBubbles: Array.isArray(quiz.preferenceBubbles) ? quiz.preferenceBubbles : [],
+    archetype: computeBuddyArchetype(migratedAnswers),
+    updatedAt: quiz.updatedAt
+  };
+}
+
+function getOptionMeta(qId: QuizQuestionKey, choice: string): GamifiedQuizOption | undefined {
+  const q = BUDDY_QUIZ_QUESTIONS.find((item) => item.id === qId);
+  return q?.options.find((o) => o.key === choice);
+}
+
+/**
+ * Dynamically generates the short Icebreaker Hook Pill (for Match Invitation cards)
+ * and the pinned Icebreaker Hook Banner + question (for Active Chats) by comparing
+ * 1–2 matching answers between the user and the buddy.
+ */
+export function generateIcebreakerHooks(
+  userAnswers?: BuddyQuizAnswers,
+  partnerAnswers?: BuddyQuizAnswers,
+  partnerName?: string,
+  eventTitle?: string
+): { pill: string; banner: string; question: string; sharedTraits: string[] } {
+  if (!userAnswers || !partnerAnswers) {
+    const fallbackEvent = eventTitle ? `for ${eventTitle}` : 'on campus';
+    return {
+      pill: 'Verified Waterloo Buddy Match',
+      banner: `Icebreaker: You're both heading out ${fallbackEvent}. Ask them what they're most excited for!`,
+      question: eventTitle
+        ? `Hey${partnerName ? ` ${partnerName.split(' ')[0]}` : ''}! What are you most excited for at ${eventTitle}?`
+        : "Hey! What campus events are you most excited for this week?",
+      sharedTraits: []
+    };
+  }
+
+  // Prioritize the most fun / conversational questions first for Icebreakers
+  const priorityOrder: QuizQuestionKey[] = ['q8', 'q1', 'q4', 'q2', 'q3', 'q7', 'q5', 'q6'];
+  const matched: { qId: QuizQuestionKey; opt: GamifiedQuizOption }[] = [];
+
+  for (const qId of priorityOrder) {
+    if (userAnswers[qId] === partnerAnswers[qId]) {
+      const opt = getOptionMeta(qId, userAnswers[qId]);
+      if (opt) matched.push({ qId, opt });
+    }
+  }
+
+  // Complementary Talker + Listener synergy if fewer than 2 exact matches
+  const hasTalkerListenerPair =
+    (userAnswers.q6 === 'A' && partnerAnswers.q6 === 'B') ||
+    (userAnswers.q6 === 'B' && partnerAnswers.q6 === 'A');
+
+  if (matched.length >= 2) {
+    const first = matched[0].opt;
+    const second = matched[1].opt;
+    return {
+      pill: `You both picked ${first.shortTag} & ${second.shortTag}`,
+      banner: `Icebreaker: You both prefer ${first.bannerPhrase} and ${second.bannerPhrase}. Ask them what they're most excited for!`,
+      question: first.conversationPrompt,
+      sharedTraits: matched.slice(0, 3).map((m) => m.opt.shortTag)
+    };
+  }
+
+  if (matched.length === 1) {
+    const first = matched[0].opt;
+    const secondClause = hasTalkerListenerPair
+      ? 'make a balanced Talker + Listener duo'
+      : 'bring great complementary energy';
+    return {
+      pill: `You both picked ${first.shortTag}`,
+      banner: `Icebreaker: You both love ${first.bannerPhrase} and ${secondClause}. Ask them what they're most excited for!`,
+      question: first.conversationPrompt,
+      sharedTraits: [first.shortTag]
+    };
+  }
+
+  if (hasTalkerListenerPair) {
+    return {
+      pill: 'Balanced Talker + Listener Vibe',
+      banner: "Icebreaker: One of you keeps the energy going while the other brings thoughtful questions — a classic duo. Ask what drew them to this event!",
+      question: "What made you want to check out this event?",
+      sharedTraits: ['Balanced Talker + Listener']
+    };
+  }
+
+  return {
+    pill: 'Fresh Perspectives · Waterloo Buddies',
+    banner: "Icebreaker: You bring different campus vibes that balance each other out. Ask them what they're most excited to check out!",
+    question: "Hey! What are you most excited to check out at this event?",
+    sharedTraits: []
+  };
+}
+
+/**
+ * Evaluates strict dealbreaker tags from preferenceBubbles.
+ * Returns { passes: false, reason } if a strict preference is violated.
+ */
+export function evaluateDealbreakers(
+  preferenceBubbles: BuddyPreferenceTag[] = [],
+  userProfile?: UserProfile | null,
+  partnerProfile?: AttendeeProfile | null
+): { passes: boolean; reason?: string; softMatched: string[]; softTotal: number } {
+  if (!partnerProfile || preferenceBubbles.length === 0) {
+    return { passes: true, softMatched: [], softTotal: 0 };
+  }
+
+  // Hard filters
+  if (preferenceBubbles.includes('Women only') && partnerProfile.gender && partnerProfile.gender !== 'woman') {
+    return { passes: false, reason: 'Filtered out by Women only preference', softMatched: [], softTotal: 0 };
+  }
+  if (preferenceBubbles.includes('Men only') && partnerProfile.gender && partnerProfile.gender !== 'man') {
+    return { passes: false, reason: 'Filtered out by Men only preference', softMatched: [], softTotal: 0 };
+  }
+  if (preferenceBubbles.includes('Alcohol-free hangouts') && partnerProfile.traits?.alcoholFree === false) {
+    return { passes: false, reason: 'Filtered out by Alcohol-free hangouts preference', softMatched: [], softTotal: 0 };
+  }
+  if (
+    preferenceBubbles.includes('Same faculty') &&
+    userProfile?.faculty &&
+    partnerProfile.faculty &&
+    userProfile.faculty !== partnerProfile.faculty
+  ) {
+    return { passes: false, reason: 'Filtered out by Same faculty preference', softMatched: [], softTotal: 0 };
+  }
+  if (
+    preferenceBubbles.includes('Outside my faculty') &&
+    userProfile?.faculty &&
+    partnerProfile.faculty &&
+    userProfile.faculty === partnerProfile.faculty
+  ) {
+    return { passes: false, reason: 'Filtered out by Outside my faculty preference', softMatched: [], softTotal: 0 };
+  }
+  if (
+    preferenceBubbles.includes('Same year') &&
+    userProfile?.year &&
+    partnerProfile.year &&
+    userProfile.year !== partnerProfile.year
+  ) {
+    return { passes: false, reason: 'Filtered out by Same year preference', softMatched: [], softTotal: 0 };
+  }
+
+  // Soft preference boosts (contribute to the 20% preference/dealbreaker weight)
+  const softTags: { tag: BuddyPreferenceTag; check: () => boolean }[] = [
+    { tag: 'Group match (3–4 people)', check: () => Boolean(partnerProfile.traits?.prefersGroup) },
+    { tag: 'Strictly platonic', check: () => partnerProfile.traits?.strictlyPlatonic !== false },
+    { tag: 'Study-focused', check: () => Boolean(partnerProfile.traits?.studyFocused) },
+    { tag: 'Punctual / No flakes', check: () => partnerProfile.traits?.punctual !== false },
+    { tag: 'Lives on campus', check: () => Boolean(partnerProfile.traits?.livesOnCampus) },
+    { tag: 'Commuter-friendly', check: () => Boolean(partnerProfile.traits?.commuterFriendly) }
+  ];
+
+  const activeSoft = softTags.filter((s) => preferenceBubbles.includes(s.tag));
+  const softMatched = activeSoft.filter((s) => s.check()).map((s) => s.tag);
+
+  return {
+    passes: true,
+    softMatched,
+    softTotal: activeSoft.length
+  };
+}
+
+function inferDefaultSocialBattery(answers?: BuddyQuizAnswers): SocialBatteryTag {
+  if (!answers) return 'Chill & Observing';
+  if (answers.q1 === 'A' && answers.q6 === 'A') return 'Hyped & Chatty';
+  if (answers.q3 === 'A' && answers.q5 === 'B') return 'Strictly Networking';
+  if (answers.q2 === 'B' && answers.q7 === 'B') return "Just don't want to walk alone";
+  return 'Chill & Observing';
+}
+
+function scoreSocialBatteryMatch(
+  userBattery?: SocialBatteryTag,
+  partnerBattery?: SocialBatteryTag
+): { points: number; alignmentLabel: string } {
+  if (!userBattery || !partnerBattery) {
+    return { points: 28, alignmentLabel: 'Flexible event energy' };
+  }
+  if (userBattery === partnerBattery) {
+    return { points: 40, alignmentLabel: `Matched energy: ${userBattery}` };
+  }
+  const compatiblePairs: [SocialBatteryTag, SocialBatteryTag][] = [
+    ['Chill & Observing', "Just don't want to walk alone"],
+    ['Hyped & Chatty', 'Strictly Networking'],
+    ['Chill & Observing', 'Strictly Networking']
+  ];
+  const isCompatible = compatiblePairs.some(
+    ([a, b]) =>
+      (userBattery === a && partnerBattery === b) ||
+      (userBattery === b && partnerBattery === a)
+  );
+  if (isCompatible) {
+    return { points: 29, alignmentLabel: `Complementary energy (${partnerBattery})` };
+  }
+  return { points: 18, alignmentLabel: `Different pace (${partnerBattery})` };
+}
+
+/**
+ * Weighted scoring function on student profiles:
+ * - 40% Quiz Compatibility (8-question answers)
+ * - 40% Event-Specific Social Battery match
+ * - 20% Preference / Dealbreaker filter (with hard-filtering for strict tags)
+ */
+export function calculateCompatibility(
+  rawUserQuiz?: PersonalityQuizProfile,
+  rawPartnerQuiz?: PersonalityQuizProfile,
+  userProfile?: UserProfile | null,
+  partnerProfile?: AttendeeProfile | null,
+  eventSocialBattery?: SocialBatteryTag,
+  eventId?: string,
+  eventTitle?: string
+): CompatibilityMatch {
+  const userQuiz = normalizeQuizProfile(rawUserQuiz);
+  const partnerQuiz = normalizeQuizProfile(rawPartnerQuiz);
+
+  const userPrefs = userQuiz?.preferenceBubbles || [];
+  const dealbreakerResult = evaluateDealbreakers(userPrefs, userProfile, partnerProfile);
+
+  const icebreaker = generateIcebreakerHooks(
+    userQuiz?.answers,
+    partnerQuiz?.answers,
+    partnerProfile?.name,
+    eventTitle
+  );
+
+  // 1. 40% Quiz Compatibility
+  let quizPoints = 28; // warm baseline if quiz not completed yet
   const reasons: string[] = [];
 
-  // 1. Social Energy alignment (Introvert / Ambivert / Extrovert)
-  let energyAlignment = '';
-  if (userQuiz.socialEnergy === partnerQuiz.socialEnergy) {
-    score += 15;
-    if (userQuiz.socialEnergy === 'introvert') {
-      energyAlignment = 'Both recharge in calmer, low-pressure settings';
-      reasons.push('Shared low-pressure social energy — neither feels pushed into overwhelming crowds');
-    } else if (userQuiz.socialEnergy === 'ambivert') {
-      energyAlignment = 'Both enjoy balanced social pacing';
-      reasons.push('Matched ambivert styles — both enjoy event buzz with moments to step back');
-    } else {
-      energyAlignment = 'Both bring high enthusiasm and energetic presence';
-      reasons.push('Matching high social energy — excited to dive right into the crowd');
+  if (userQuiz?.completed && userQuiz.answers && partnerQuiz?.completed && partnerQuiz.answers) {
+    let matchedWeight = 0;
+    const totalWeight = 8;
+    const keys: QuizQuestionKey[] = ['q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7', 'q8'];
+
+    for (const k of keys) {
+      if (userQuiz.answers[k] === partnerQuiz.answers[k]) {
+        matchedWeight += 1;
+      } else if (k === 'q6') {
+        // Talker + Listener is naturally complementary!
+        matchedWeight += 0.85;
+      } else if (k === 'q3') {
+        // Planner + Chill One or Connector + Chill One also gels well
+        matchedWeight += 0.55;
+      } else {
+        matchedWeight += 0.25;
+      }
     }
-  } else if (
-    (userQuiz.socialEnergy === 'ambivert' && partnerQuiz.socialEnergy === 'introvert') ||
-    (userQuiz.socialEnergy === 'introvert' && partnerQuiz.socialEnergy === 'ambivert')
-  ) {
-    score += 12;
-    energyAlignment = 'Complimentary relaxed pacing';
-    reasons.push('Compatible social energy — supportive, patient vibe for attending together');
+
+    quizPoints = Math.round((matchedWeight / totalWeight) * 40);
+    reasons.push(icebreaker.pill);
   } else {
-    score += 8;
-    energyAlignment = 'Balanced dynamic';
+    reasons.push('Both verified University of Waterloo students');
   }
 
-  // 2. Preferred Environment alignment
-  let envAlignment = '';
-  if (userQuiz.socialEnvironment === partnerQuiz.socialEnvironment) {
-    score += 15;
-    const envObj = SOCIAL_ENVIRONMENT_OPTIONS.find((e) => e.value === userQuiz.socialEnvironment);
-    envAlignment = envObj?.title || 'Matching atmosphere preference';
-    reasons.push(`Both prefer ${envObj?.title.toLowerCase()} settings`);
-  } else {
-    score += 6;
-    envAlignment = 'Flexible event atmosphere';
-  }
+  // 2. 40% Event-Specific Social Battery match
+  const effectiveUserBattery = eventSocialBattery || inferDefaultSocialBattery(userQuiz?.answers);
+  const effectivePartnerBattery =
+    (eventId && partnerProfile?.eventSocialBatteries?.[eventId]) ||
+    partnerProfile?.defaultSocialBattery ||
+    inferDefaultSocialBattery(partnerQuiz?.answers);
 
-  // 3. Preferred Group Size alignment
-  let groupAlign = '';
-  if (
-    userQuiz.groupSize === partnerQuiz.groupSize ||
-    userQuiz.groupSize === 'flexible' ||
-    partnerQuiz.groupSize === 'flexible'
-  ) {
-    score += 10;
-    if (userQuiz.groupSize === 'duo' && partnerQuiz.groupSize === 'duo') {
-      groupAlign = 'Both specifically prefer a 1-on-1 buddy duo';
-      reasons.push('Both specifically looking for a 1-on-1 buddy duo to walk in with');
-    } else {
-      groupAlign = 'Compatible group size preferences';
-      reasons.push('Aligned on group format and comfortable pacing');
+  const batteryEval = scoreSocialBatteryMatch(effectiveUserBattery, effectivePartnerBattery);
+  const batteryPoints = batteryEval.points;
+  reasons.push(batteryEval.alignmentLabel);
+
+  // 3. 20% Preference / Dealbreaker score
+  let prefPoints = 16;
+  if (!dealbreakerResult.passes) {
+    prefPoints = 0;
+  } else if (dealbreakerResult.softTotal > 0) {
+    const ratio = dealbreakerResult.softMatched.length / dealbreakerResult.softTotal;
+    prefPoints = Math.round(10 + ratio * 10);
+    if (dealbreakerResult.softMatched.length > 0) {
+      reasons.push(`Matches preferences: ${dealbreakerResult.softMatched.slice(0, 2).join(', ')}`);
     }
-  } else {
-    score += 4;
-    groupAlign = 'Open group expectations';
+  } else if (userPrefs.length > 0) {
+    // Passed all strict dealbreakers!
+    prefPoints = 20;
+    reasons.push('Matches all your buddy preferences');
   }
 
-  // 4. Shared Hobbies (Multi-select overlap)
-  const sharedHobbies = userQuiz.hobbies.filter((h) => partnerQuiz.hobbies.includes(h));
-  if (sharedHobbies.length > 0) {
-    const hobbyBoost = Math.min(sharedHobbies.length * 5, 20);
-    score += hobbyBoost;
-    reasons.push(`Common hobbies: ${sharedHobbies.slice(0, 3).join(', ')}${sharedHobbies.length > 3 ? ` +${sharedHobbies.length - 3} more` : ''}`);
-  }
-
-  // 5. Shared Experience Types
-  const sharedExperienceTypes = userQuiz.experienceTypes.filter((e) =>
-    partnerQuiz.experienceTypes.includes(e)
-  );
-  if (sharedExperienceTypes.length > 0) {
-    const expBoost = Math.min(sharedExperienceTypes.length * 4, 15);
-    score += expBoost;
-    reasons.push(`Both enjoy: ${sharedExperienceTypes.slice(0, 2).join(' & ')}`);
-  }
-
-  // 6. Faculty / Year contextual alignment
   if (userProfile?.faculty && partnerProfile?.faculty && userProfile.faculty === partnerProfile.faculty) {
-    score += 5;
     reasons.push(`Both in the Faculty of ${userProfile.faculty}`);
   }
 
-  // Normalize final score between 65% and 98%
-  const finalScore = Math.min(Math.max(score, 65), 98);
+  const rawTotal = quizPoints + batteryPoints + prefPoints;
+  const finalScore = dealbreakerResult.passes ? Math.min(Math.max(rawTotal, 58), 99) : 0;
 
   let overallVibe = 'Great Match';
   if (finalScore >= 90) overallVibe = 'Exceptional Match';
@@ -241,11 +692,19 @@ export function calculateCompatibility(
   return {
     score: finalScore,
     overallVibe,
-    reasons,
-    sharedHobbies,
-    sharedExperienceTypes,
-    socialEnergyAlignment: energyAlignment,
-    environmentAlignment: envAlignment,
-    groupAlignment: groupAlign
+    reasons: reasons.slice(0, 4),
+    sharedHobbies: icebreaker.sharedTraits,
+    sharedExperienceTypes: [],
+    socialEnergyAlignment: batteryEval.alignmentLabel,
+    environmentAlignment: icebreaker.pill,
+    groupAlignment: dealbreakerResult.softMatched.join(', ') || 'Compatible buddy preferences',
+    icebreakerPill: icebreaker.pill,
+    icebreakerBanner: icebreaker.banner,
+    icebreakerQuestion: icebreaker.question,
+    quizScore: quizPoints,
+    batteryScore: batteryPoints,
+    preferenceScore: prefPoints,
+    filteredOut: !dealbreakerResult.passes,
+    filteredOutReason: dealbreakerResult.reason
   };
 }

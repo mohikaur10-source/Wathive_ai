@@ -1,29 +1,15 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { X, Sparkles, ArrowLeft, Check } from 'lucide-react';
 import {
-  X,
-  Sparkles,
-  Check,
-  Compass,
-  Users,
-  Coffee,
-  Heart,
-  ArrowRight,
-  ArrowLeft,
-  Sliders,
-  Shield
-} from 'lucide-react';
-import {
-  PersonalityQuizProfile,
-  SocialEnergy,
-  SocialEnvironment,
-  GroupSizePreference
+  BuddyPreferenceTag,
+  BuddyQuizAnswers,
+  PersonalityQuizProfile
 } from '../../types';
 import {
-  SOCIAL_ENERGY_OPTIONS,
-  SOCIAL_ENVIRONMENT_OPTIONS,
-  GROUP_SIZE_OPTIONS,
-  AVAILABLE_HOBBIES,
-  AVAILABLE_EXPERIENCE_TYPES
+  BUDDY_QUIZ_QUESTIONS,
+  BUDDY_PREFERENCE_BUBBLES,
+  computeBuddyArchetype,
+  QuizQuestionKey
 } from '../../utils/compatibilityEngine';
 import { useApp } from '../../context/AppContext';
 
@@ -31,338 +17,266 @@ interface PersonalityQuizModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess?: () => void;
+  onNavigateToBuddyHub?: () => void;
 }
 
 export const PersonalityQuizModal: React.FC<PersonalityQuizModalProps> = ({
   isOpen,
   onClose,
-  onSuccess
+  onSuccess,
+  onNavigateToBuddyHub
 }) => {
-  const { user, updatePersonalityQuiz } = useApp();
+  const { user, completeQuizAndPopulateMatches } = useApp();
 
-  const currentQuiz = user?.personalityQuiz || {
-    completed: false,
-    socialEnergy: 'ambivert',
-    socialEnvironment: 'cozy_relaxed',
-    hobbies: ['Tech & Coding', 'Foodie & Cafes', 'Board Games & Trivia'],
-    groupSize: 'duo',
-    experienceTypes: ['Casual Conversations', 'Hands-on Building']
-  };
+  const totalQuestions = BUDDY_QUIZ_QUESTIONS.length; // 8
+  // step 0..7 = Q1..Q8, step 8 = Preferences & Dealbreakers screen
+  const [stepIndex, setStepIndex] = useState<number>(0);
+  const [answers, setAnswers] = useState<Partial<BuddyQuizAnswers>>(
+    () => user?.personalityQuiz?.answers || {}
+  );
+  const [selectedPrefs, setSelectedPrefs] = useState<BuddyPreferenceTag[]>(
+    () => user?.personalityQuiz?.preferenceBubbles || []
+  );
+  const [justTappedKey, setJustTappedKey] = useState<string | null>(null);
 
-  const [quizStep, setQuizStep] = useState<1 | 2 | 3 | 4 | 5>(1);
-  const [socialEnergy, setSocialEnergy] = useState<SocialEnergy>(currentQuiz.socialEnergy);
-  const [socialEnvironment, setSocialEnvironment] = useState<SocialEnvironment>(currentQuiz.socialEnvironment);
-  const [hobbies, setHobbies] = useState<string[]>(currentQuiz.hobbies);
-  const [groupSize, setGroupSize] = useState<GroupSizePreference>(currentQuiz.groupSize);
-  const [experienceTypes, setExperienceTypes] = useState<string[]>(currentQuiz.experienceTypes);
-  const [savedSuccess, setSavedSuccess] = useState(false);
+  // Reset to Question 1 cleanly whenever modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setStepIndex(0);
+      setAnswers(user?.personalityQuiz?.answers || {});
+      setSelectedPrefs(user?.personalityQuiz?.preferenceBubbles || []);
+      setJustTappedKey(null);
+    }
+  }, [isOpen, user?.personalityQuiz]);
 
   if (!isOpen) return null;
 
-  const toggleHobby = (hobby: string) => {
-    setHobbies((prev) =>
-      prev.includes(hobby) ? prev.filter((h) => h !== hobby) : [...prev, hobby]
+  const isPreferencesScreen = stepIndex >= totalQuestions;
+  const currentQuestion = !isPreferencesScreen ? BUDDY_QUIZ_QUESTIONS[stepIndex] : null;
+  const progressPercent = isPreferencesScreen
+    ? 100
+    : ((stepIndex + 1) / totalQuestions) * 100;
+
+  const handleSelectOption = (questionId: QuizQuestionKey, optionKey: 'A' | 'B' | 'C') => {
+    setAnswers((prev) => ({
+      ...prev,
+      [questionId]: optionKey
+    }));
+    setJustTappedKey(optionKey);
+
+    // Brief visual tap feedback then instant auto-advance
+    window.setTimeout(() => {
+      setJustTappedKey(null);
+      setStepIndex((prev) => Math.min(prev + 1, totalQuestions));
+    }, 160);
+  };
+
+  const togglePreferenceBubble = (tag: BuddyPreferenceTag) => {
+    setSelectedPrefs((prev) =>
+      prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag]
     );
   };
 
-  const toggleExperienceType = (exp: string) => {
-    setExperienceTypes((prev) =>
-      prev.includes(exp) ? prev.filter((e) => e !== exp) : [...prev, exp]
-    );
-  };
-
-  const handleFinishQuiz = () => {
-    const completedQuiz: PersonalityQuizProfile = {
-      completed: true,
-      socialEnergy,
-      socialEnvironment,
-      hobbies: hobbies.length > 0 ? hobbies : ['Tech & Coding', 'Foodie & Cafes'],
-      groupSize,
-      experienceTypes: experienceTypes.length > 0 ? experienceTypes : ['Casual Conversations']
+  const handleSaveAndFindBuddies = () => {
+    const finalizedAnswers: BuddyQuizAnswers = {
+      q1: (answers.q1 as 'A' | 'B') || 'B',
+      q2: (answers.q2 as 'A' | 'B') || 'B',
+      q3: (answers.q3 as 'A' | 'B' | 'C') || 'C',
+      q4: (answers.q4 as 'A' | 'B' | 'C') || 'A',
+      q5: (answers.q5 as 'A' | 'B') || 'B',
+      q6: (answers.q6 as 'A' | 'B') || 'B',
+      q7: (answers.q7 as 'A' | 'B') || 'B',
+      q8: (answers.q8 as 'A' | 'B') || 'B'
     };
 
-    updatePersonalityQuiz(completedQuiz);
-    setSavedSuccess(true);
-    setTimeout(() => {
-      setSavedSuccess(false);
-      onSuccess?.();
-      onClose();
-    }, 1500);
+    const archetype = computeBuddyArchetype(finalizedAnswers);
+    const completedProfile: PersonalityQuizProfile = {
+      completed: true,
+      answers: finalizedAnswers,
+      preferenceBubbles: selectedPrefs,
+      archetype,
+      updatedAt: new Date().toISOString()
+    };
+
+    completeQuizAndPopulateMatches(completedProfile);
+    onSuccess?.();
+    onClose();
+    onNavigateToBuddyHub?.();
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
-      <div className="bg-surface text-ink rounded-3xl max-w-xl w-full p-6 sm:p-8 shadow-lift border border-line relative my-auto animate-in fade-in zoom-in-95 duration-150">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs overflow-y-auto"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Buddy Vibe Personality Quiz"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="bg-surface text-ink rounded-3xl max-w-lg w-full p-6 sm:p-7 shadow-lift border border-line relative my-auto">
         <button
+          type="button"
           onClick={onClose}
           className="absolute top-5 right-5 p-2 text-muted hover:text-ink rounded-full hover:bg-surface-soft transition-colors cursor-pointer"
-          aria-label="Close"
+          aria-label="Close quiz"
         >
           <X className="w-5 h-5" />
         </button>
 
-        {savedSuccess ? (
-          <div className="py-10 text-center space-y-3">
-            <div className="w-14 h-14 rounded-full bg-accent text-accent-ink flex items-center justify-center mx-auto shadow-soft">
-              <Check className="w-8 h-8 stroke-[3]" />
+        <div className="space-y-6">
+          {/* Sleek Top Progress Bar & Step Counter */}
+          <div className="space-y-2.5 pr-8">
+            <div className="flex items-center justify-between text-xs font-bold">
+              <span className="flex items-center gap-1.5 text-accent-text uppercase tracking-wider">
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Buddy Vibe Quiz</span>
+              </span>
+              <span className="text-muted font-semibold tabular-nums">
+                {isPreferencesScreen ? 'Final Step' : `${stepIndex + 1} / ${totalQuestions}`}
+              </span>
             </div>
-            <h3 className="text-xl font-bold text-ink">
-              Compatibility Profile Updated!
-            </h3>
-            <p className="text-xs text-muted max-w-sm mx-auto leading-relaxed">
-              Your personality and interest quiz answers have been saved. When browsing event attendees, you&apos;ll see transparent match scores and mutual compatibility reasons.
-            </p>
+
+            <div className="w-full bg-surface-soft rounded-full h-1.5 overflow-hidden">
+              <div
+                className="bg-accent h-1.5 transition-all duration-200 rounded-full"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
           </div>
-        ) : (
-          <div className="space-y-6">
-            {/* Header and Step Indicator */}
-            <div>
-              <div className="flex items-center justify-between text-xs font-bold text-accent-text uppercase tracking-wider mb-1 pr-8">
-                <span className="flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Personality &amp; Interest Quiz</span>
-                </span>
-                <span className="text-muted font-semibold normal-case">
-                  Step {quizStep} of 5
-                </span>
-              </div>
-              <h3 className="text-xl font-bold text-ink">
-                {quizStep === 1 && 'Social Energy & Introversion'}
-                {quizStep === 2 && 'Preferred Social Atmosphere'}
-                {quizStep === 3 && 'Shared Hobbies & Passions'}
-                {quizStep === 4 && 'Comfortable Group Dynamics'}
-                {quizStep === 5 && 'Types of Shared Experiences'}
+
+          {/* Question Screens (1–8) */}
+          {currentQuestion && (
+            <div className="space-y-5">
+              <h3 className="font-display text-xl sm:text-2xl font-bold text-ink leading-snug">
+                {currentQuestion.question}
               </h3>
-              <p className="text-xs text-muted mt-1 leading-relaxed">
-                {quizStep === 1 && 'How do you prefer to experience social gatherings and recharge?'}
-                {quizStep === 2 && 'What kind of campus settings make you feel most comfortable?'}
-                {quizStep === 3 && 'Pick the topics, activities, and hobbies you get most excited about.'}
-                {quizStep === 4 && 'How large of a group do you feel most comfortable walking in with?'}
-                {quizStep === 5 && 'What kind of event activities do you hope to share with your buddy?'}
-              </p>
 
-              {/* Progress bar */}
-              <div className="w-full bg-surface-soft rounded-full h-1.5 mt-3 overflow-hidden">
-                <div
-                  className="bg-accent h-1.5 transition-all duration-300 rounded-full"
-                  style={{ width: `${(quizStep / 5) * 100}%` }}
-                />
-              </div>
-            </div>
-
-            {/* STEP 1: Social Energy */}
-            {quizStep === 1 && (
               <div className="space-y-3">
-                {SOCIAL_ENERGY_OPTIONS.map((opt) => {
-                  const isSelected = socialEnergy === opt.value;
+                {currentQuestion.options.map((opt) => {
+                  const isCurrentChoice =
+                    justTappedKey === opt.key ||
+                    (justTappedKey === null && answers[currentQuestion.id] === opt.key);
+
                   return (
-                    <div
-                      key={opt.value}
-                      onClick={() => setSocialEnergy(opt.value)}
-                      className={`p-4 rounded-2xl border transition-all cursor-pointer flex items-start gap-3.5 ${
-                        isSelected
-                          ? 'bg-accent-soft border-accent shadow-2xs'
-                          : 'bg-canvas/50 border-line hover:border-accent/50'
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => handleSelectOption(currentQuestion.id, opt.key)}
+                      className={`w-full p-4 sm:p-5 rounded-2xl border text-left transition-all cursor-pointer flex items-center gap-4 group active:scale-[0.99] ${
+                        isCurrentChoice
+                          ? 'bg-accent-soft border-accent shadow-soft'
+                          : 'bg-canvas/70 border-line hover:border-accent/70 hover:bg-surface-soft/60'
                       }`}
                     >
-                      <div
-                        className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
-                          isSelected
-                            ? 'border-accent bg-accent text-accent-ink'
-                            : 'border-line bg-surface'
+                      <span
+                        className={`w-9 h-9 rounded-xl font-display font-bold text-sm flex items-center justify-center shrink-0 transition-colors ${
+                          isCurrentChoice
+                            ? 'bg-accent text-accent-ink'
+                            : 'bg-surface border border-line text-muted group-hover:text-ink'
                         }`}
                       >
-                        {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                        {opt.key}
+                      </span>
+
+                      <div className="flex-1 min-w-0 flex items-center justify-between gap-3">
+                        <span className="text-sm sm:text-base font-semibold text-ink leading-snug">
+                          {opt.label}
+                        </span>
+                        <span className="text-xl shrink-0" aria-hidden="true">
+                          {opt.emoji}
+                        </span>
                       </div>
-                      <div className="min-w-0 flex-1 space-y-0.5">
-                        <h4 className="font-bold text-sm text-ink">{opt.title}</h4>
-                        <p className="text-xs text-muted leading-relaxed">{opt.description}</p>
-                      </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
-            )}
 
-            {/* STEP 2: Social Environment */}
-            {quizStep === 2 && (
-              <div className="space-y-3">
-                {SOCIAL_ENVIRONMENT_OPTIONS.map((opt) => {
-                  const isSelected = socialEnvironment === opt.value;
-                  return (
-                    <div
-                      key={opt.value}
-                      onClick={() => setSocialEnvironment(opt.value)}
-                      className={`p-4 rounded-2xl border transition-all cursor-pointer flex items-start gap-3.5 ${
-                        isSelected
-                          ? 'bg-accent-soft border-accent shadow-2xs'
-                          : 'bg-canvas/50 border-line hover:border-accent/50'
-                      }`}
-                    >
-                      <div
-                        className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
-                          isSelected
-                            ? 'border-accent bg-accent text-accent-ink'
-                            : 'border-line bg-surface'
-                        }`}
-                      >
-                        {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                      </div>
-                      <div className="min-w-0 flex-1 space-y-0.5">
-                        <h4 className="font-bold text-sm text-ink">{opt.title}</h4>
-                        <p className="text-xs text-muted leading-relaxed">{opt.description}</p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+              {/* Minimal Back / Helper Row */}
+              <div className="flex items-center justify-between pt-2 border-t border-line">
+                {stepIndex > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setStepIndex((prev) => Math.max(0, prev - 1))}
+                    className="px-3 py-2 rounded-xl text-xs font-semibold text-muted hover:text-ink hover:bg-surface-soft flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Back</span>
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-muted">Tap a card to advance</span>
+                )}
 
-            {/* STEP 3: Hobbies & Passions (Multi-select) */}
-            {quizStep === 3 && (
-              <div className="space-y-3">
-                <span className="text-xs font-semibold text-ink block">
-                  Select all that resonate with you ({hobbies.length} selected):
-                </span>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[46vh] overflow-y-auto pr-1">
-                  {AVAILABLE_HOBBIES.map((hobby) => {
-                    const isSelected = hobbies.includes(hobby);
-                    return (
-                      <button
-                        key={hobby}
-                        type="button"
-                        onClick={() => toggleHobby(hobby)}
-                        className={`p-3 rounded-xl border text-xs font-semibold text-left transition-all flex items-center justify-between cursor-pointer ${
-                          isSelected
-                            ? 'bg-accent-soft border-accent text-ink font-bold shadow-2xs'
-                            : 'bg-canvas/50 border-line text-ink hover:border-accent/50'
-                        }`}
-                      >
-                        <span className="truncate pr-1">{hobby}</span>
-                        {isSelected && <Check className="w-3.5 h-3.5 text-accent-text shrink-0" />}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* STEP 4: Preferred Group Sizes */}
-            {quizStep === 4 && (
-              <div className="space-y-3">
-                {GROUP_SIZE_OPTIONS.map((opt) => {
-                  const isSelected = groupSize === opt.value;
-                  return (
-                    <div
-                      key={opt.value}
-                      onClick={() => setGroupSize(opt.value)}
-                      className={`p-4 rounded-2xl border transition-all cursor-pointer flex items-start gap-3.5 ${
-                        isSelected
-                          ? 'bg-accent-soft border-accent shadow-2xs'
-                          : 'bg-canvas/50 border-line hover:border-accent/50'
-                      }`}
-                    >
-                      <div
-                        className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
-                          isSelected
-                            ? 'border-accent bg-accent text-accent-ink'
-                            : 'border-line bg-surface'
-                        }`}
-                      >
-                        {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                      </div>
-                      <div className="min-w-0 flex-1 space-y-0.5">
-                        <h4 className="font-bold text-sm text-ink">{opt.title}</h4>
-                        <p className="text-xs text-muted leading-relaxed">{opt.description}</p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* STEP 5: Experience Types (Multi-select) */}
-            {quizStep === 5 && (
-              <div className="space-y-3">
-                <span className="text-xs font-semibold text-ink block">
-                  Select your preferred experience styles ({experienceTypes.length} selected):
-                </span>
-                <div className="grid grid-cols-2 gap-2 max-h-[46vh] overflow-y-auto pr-1">
-                  {AVAILABLE_EXPERIENCE_TYPES.map((exp) => {
-                    const isSelected = experienceTypes.includes(exp);
-                    return (
-                      <button
-                        key={exp}
-                        type="button"
-                        onClick={() => toggleExperienceType(exp)}
-                        className={`p-3 rounded-xl border text-xs font-semibold text-left transition-all flex items-center justify-between cursor-pointer ${
-                          isSelected
-                            ? 'bg-accent-soft border-accent text-ink font-bold shadow-2xs'
-                            : 'bg-canvas/50 border-line text-ink hover:border-accent/50'
-                        }`}
-                      >
-                        <span className="truncate pr-1">{exp}</span>
-                        {isSelected && <Check className="w-3.5 h-3.5 text-accent-text shrink-0" />}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div className="p-3 bg-surface-soft/50 rounded-xl border border-line text-[11px] text-muted space-y-1">
-                  <span className="font-bold text-ink flex items-center gap-1">
-                    <Shield className="w-3.5 h-3.5 text-accent-text" />
-                    <span>Transparent Matching Engine</span>
-                  </span>
-                  <p>
-                    These preferences are used to compute compatibility percentages and display common grounds. You can update this quiz anytime from your Profile.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* Navigational Buttons */}
-            <div className="flex items-center justify-between pt-3 border-t border-line">
-              {quizStep > 1 ? (
-                <button
-                  type="button"
-                  onClick={() => setQuizStep((prev) => (prev - 1) as 1 | 2 | 3 | 4 | 5)}
-                  className="px-4 py-2.5 rounded-xl border border-line text-ink text-xs font-bold flex items-center gap-1.5 hover:bg-surface-soft cursor-pointer"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Previous</span>
-                </button>
-              ) : (
                 <button
                   type="button"
                   onClick={onClose}
-                  className="px-4 py-2.5 text-muted hover:text-ink text-xs font-semibold cursor-pointer"
+                  className="text-xs font-medium text-muted hover:text-ink px-2 py-1 cursor-pointer"
                 >
-                  Skip for Now
+                  Cancel
                 </button>
-              )}
-
-              {quizStep < 5 ? (
-                <button
-                  type="button"
-                  onClick={() => setQuizStep((prev) => (prev + 1) as 1 | 2 | 3 | 4 | 5)}
-                  className="px-5 py-2.5 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-bold flex items-center gap-1.5 shadow-soft cursor-pointer"
-                >
-                  <span>Next Question</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleFinishQuiz}
-                  className="px-6 py-2.5 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-black flex items-center gap-1.5 shadow-soft cursor-pointer"
-                >
-                  <Check className="w-4 h-4 stroke-[3]" />
-                  <span>Save Quiz &amp; Finish</span>
-                </button>
-              )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+
+          {/* Final Screen: Preferences & Dealbreakers (Bubble Tags) */}
+          {isPreferencesScreen && (
+            <div className="space-y-5">
+              <div className="space-y-1">
+                <h3 className="font-display text-xl sm:text-2xl font-bold text-ink leading-snug">
+                  Any preferences for your buddy?
+                </h3>
+                <p className="text-xs sm:text-sm text-muted leading-relaxed">
+                  Tap as many as you want—or skip if you&apos;re open to anyone.
+                </p>
+              </div>
+
+              {/* Clean rounded rectangular container with multi-select interactive pill/bubble tags */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-canvas border border-line">
+                <div className="flex flex-wrap gap-2">
+                  {BUDDY_PREFERENCE_BUBBLES.map((tag) => {
+                    const isSelected = selectedPrefs.includes(tag);
+                    return (
+                      <button
+                        key={tag}
+                        type="button"
+                        aria-pressed={isSelected}
+                        onClick={() => togglePreferenceBubble(tag)}
+                        className={`px-3.5 py-2 rounded-full text-xs font-semibold border transition-all cursor-pointer inline-flex items-center gap-1.5 ${
+                          isSelected
+                            ? 'bg-accent border-accent text-accent-ink shadow-soft'
+                            : 'bg-surface border-line text-ink hover:border-accent/60 hover:bg-surface-soft/60'
+                        }`}
+                      >
+                        {isSelected && <Check className="w-3.5 h-3.5 stroke-[2.8] shrink-0" />}
+                        <span>{tag}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-line">
+                <button
+                  type="button"
+                  onClick={() => setStepIndex(totalQuestions - 1)}
+                  className="px-3.5 py-2.5 rounded-xl border border-line text-ink text-xs font-semibold flex items-center gap-1.5 hover:bg-surface-soft transition-colors cursor-pointer"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSaveAndFindBuddies}
+                  className="flex-1 sm:flex-initial px-6 py-2.5 rounded-2xl bg-accent hover:bg-accent-hover text-accent-ink text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-soft transition-colors cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Save &amp; Find Buddies</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

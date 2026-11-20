@@ -631,8 +631,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               <button
                 type="button"
                 onClick={() => {
+                  const mappedAnswers = {
+                    q1: (quizEnergy === 'extrovert' ? 'A' : 'B') as 'A' | 'B',
+                    q2: (quizGroup === 'larger_group' ? 'A' : 'B') as 'A' | 'B',
+                    q3: (quizEnv === 'interactive_workshop' ? 'A' : quizEnergy === 'extrovert' ? 'B' : 'C') as 'A' | 'B' | 'C',
+                    q4: (quizEnv === 'active_movement' ? 'C' : quizEnv === 'lively_vibrant' ? 'A' : 'B') as 'A' | 'B' | 'C',
+                    q5: (quizEnergy === 'extrovert' ? 'A' : 'B') as 'A' | 'B',
+                    q6: (quizEnergy === 'introvert' ? 'B' : 'A') as 'A' | 'B',
+                    q7: (quizEnergy === 'extrovert' ? 'A' : 'B') as 'A' | 'B',
+                    q8: (quizEnv === 'cozy_relaxed' ? 'B' : 'A') as 'A' | 'B'
+                  };
                   updatePersonalityQuiz({
                     completed: true,
+                    answers: mappedAnswers,
+                    preferenceBubbles: [],
                     socialEnergy: quizEnergy,
                     socialEnvironment: quizEnv,
                     hobbies: quizHobbies.length > 0 ? quizHobbies : ['Tech & Coding', 'Foodie & Cafes'],

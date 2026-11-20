@@ -24,16 +24,18 @@ import { Bee } from '../common/Bee';
 import { HexConfettiBurst } from '../common/HiveIcons';
 import { BuddyConnectModal } from './BuddyConnectModal';
 import { BuddyPrivacyPreviewModal } from './BuddyPrivacyPreviewModal';
+import { SocialBatteryModal } from './SocialBatteryModal';
 import { ReportModal } from '../common/ReportModal';
 import { UWVerificationModal } from '../common/UWVerificationModal';
 import { PersonalityQuizModal } from '../common/PersonalityQuizModal';
 import { AuthModal } from '../onboarding/AuthModal';
+import { SocialBatteryTag } from '../../types';
 
 interface EventDetailModalProps {
   event: EventItem | null;
   isOpen: boolean;
   onClose: () => void;
-  onNavigateToMessages?: () => void;
+  onNavigateToMessages?: (subTab?: 'conversations' | 'requests') => void;
 }
 
 const SmallHexAvatar: React.FC<{ attendee: AttendeeProfile; index: number }> = ({
@@ -85,6 +87,8 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     toggleGoing,
     attendeeVisibility,
     eventBuddySettings,
+    eventSocialBattery,
+    setEventSocialBattery,
     enableBuddyMatching,
     disableBuddyMatching,
     getEventAttendees,
@@ -110,6 +114,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
   const [coverFailed, setCoverFailed] = useState(false);
 
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [batteryModalOpen, setBatteryModalOpen] = useState(false);
   const [selectedAttendeeForConnect, setSelectedAttendeeForConnect] =
     useState<AttendeeProfile | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
@@ -132,6 +137,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
 
   const anySubModalOpen =
     previewModalOpen ||
+    batteryModalOpen ||
     connectModalOpen ||
     reportModalOpen ||
     quizModalOpen ||
@@ -371,6 +377,8 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     toggleSaveEvent(event.id);
   };
 
+  const currentEventBattery = eventSocialBattery[event.id];
+
   const handleFindBuddyClick = () => {
     if (!user) {
       setAuthModalOpen(true);
@@ -383,7 +391,19 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     if (!isGoing) {
       toggleGoing(event.id);
     }
-    setPreviewModalOpen(true);
+    setBatteryModalOpen(true);
+  };
+
+  const handleSelectSocialBattery = (battery: SocialBatteryTag) => {
+    setEventSocialBattery(event.id, battery);
+    setBatteryModalOpen(false);
+    const settings = eventBuddySettings[event.id] || {
+      showFaculty: true,
+      showYear: true,
+      shortIntro: user?.bio || ''
+    };
+    enableBuddyMatching(event.id, settings);
+    showToast(`Event energy set: ${battery}`);
   };
 
   const handleUpForBuddyClick = () => {
@@ -397,13 +417,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
       setVerificationModalOpen(true);
       return;
     }
-    const settings = eventBuddySettings[event.id] || {
-      showFaculty: true,
-      showYear: true,
-      shortIntro: user.bio || ''
-    };
-    enableBuddyMatching(event.id, settings);
-    window.setTimeout(() => noMatchBtnRef.current?.focus(), 0);
+    setBatteryModalOpen(true);
   };
 
   const handleUndoUpForBuddy = () => {
@@ -800,6 +814,23 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                             ))}
                         </div>
 
+                        {/* Active Event Social Battery pill when set */}
+                        {currentEventBattery && (
+                          <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-surface/80 border border-line text-xs">
+                            <span className="text-muted">
+                              Your energy:{' '}
+                              <strong className="font-semibold text-ink">{currentEventBattery}</strong>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setBatteryModalOpen(true)}
+                              className="font-semibold text-accent-text hover:underline cursor-pointer shrink-0"
+                            >
+                              Change
+                            </button>
+                          </div>
+                        )}
+
                         {/* One-line quiz link ONLY when matches exist and user has no quiz result */}
                         {visibleMatches.length > 0 && !hasQuizCompleted && (
                           <p className="text-xs text-muted">
@@ -808,7 +839,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                               onClick={() => setQuizModalOpen(true)}
                               className="font-semibold text-accent-text hover:underline cursor-pointer"
                             >
-                              Take the 1-minute quiz for better matches.
+                              Take the 30-second quiz for better matches.
                             </button>
                           </p>
                         )}
@@ -879,13 +910,20 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                                         referrerPolicy="no-referrer"
                                         className="w-9 h-9 rounded-full object-cover shrink-0"
                                       />
-                                      <div className="flex items-center gap-2 min-w-0 flex-wrap">
-                                        <span className="text-sm font-semibold text-ink truncate">
-                                          {attendee.name}
-                                        </span>
-                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-surface text-ink text-xs font-semibold tabular-nums">
-                                          {compatibility.score}% match
-                                        </span>
+                                      <div className="min-w-0">
+                                        <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                                          <span className="text-sm font-semibold text-ink truncate">
+                                            {attendee.name}
+                                          </span>
+                                          <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-surface text-ink text-xs font-semibold tabular-nums">
+                                            {compatibility.score}% match
+                                          </span>
+                                        </div>
+                                        {compatibility.icebreakerPill && (
+                                          <p className="text-[11px] text-muted truncate mt-0.5">
+                                            {compatibility.icebreakerPill}
+                                          </p>
+                                        )}
                                       </div>
                                     </div>
 
@@ -895,7 +933,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                                           type="button"
                                           onClick={() => {
                                             onClose();
-                                            onNavigateToMessages?.();
+                                            onNavigateToMessages?.('conversations');
                                           }}
                                           className="px-3 py-1.5 rounded-xl bg-surface hover:bg-surface-soft text-ink text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
                                         >
@@ -1182,10 +1220,22 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
         onClose={() => setAuthModalOpen(false)}
       />
 
+      <SocialBatteryModal
+        isOpen={batteryModalOpen}
+        eventTitle={event.title}
+        currentBattery={currentEventBattery}
+        onSelect={handleSelectSocialBattery}
+        onClose={() => setBatteryModalOpen(false)}
+      />
+
       <PersonalityQuizModal
         isOpen={quizModalOpen}
         onClose={() => setQuizModalOpen(false)}
-        onSuccess={() => showToast('Matches updated.')}
+        onSuccess={() => showToast('Matches updated!')}
+        onNavigateToBuddyHub={() => {
+          onClose();
+          onNavigateToMessages?.('requests');
+        }}
       />
     </>
   );

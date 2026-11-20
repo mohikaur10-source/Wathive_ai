@@ -7,25 +7,34 @@ import {
   X,
   ChevronDown,
   ChevronUp,
-  Check
+  Check,
+  Sparkles,
+  RotateCcw
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AttendeeProfile } from '../../types';
 import { getTorontoNow } from '../../utils/timeZone';
 import { safeMediaUrl } from '../../utils/urlSafety';
+import {
+  calculateCompatibility,
+  computeBuddyArchetype,
+  DEFAULT_ALEX_QUIZ
+} from '../../utils/compatibilityEngine';
 import { Goose } from '../common/Goose';
 import { ReportModal } from '../common/ReportModal';
+import { PersonalityQuizModal } from '../common/PersonalityQuizModal';
 import { EventDetailModal } from '../feed/EventDetailModal';
 
 interface MessagesTabProps {
   onViewEvent?: (eventId: string) => void;
+  initialSubTab?: 'conversations' | 'requests';
 }
 
 const SAFETY_NOTE_STORAGE_KEY = 'wathive_chat_safety_dismissed';
 
 const getFirstName = (fullName: string) => fullName.trim().split(/\s+/)[0] || fullName;
 
-export const MessagesTab: React.FC<MessagesTabProps> = () => {
+export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
   const {
     user,
     upcomingEvents,
@@ -39,10 +48,13 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
     removeConversations,
     blockUser,
     dailyBuddyRequestsCount,
-    maxDailyRequests
+    maxDailyRequests,
+    eventSocialBattery
   } = useApp();
 
-  const [activeSubTab, setActiveSubTab] = useState<'conversations' | 'requests'>('conversations');
+  const [activeSubTab, setActiveSubTab] = useState<'conversations' | 'requests'>(
+    initialSubTab || 'conversations'
+  );
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(() => {
     if (typeof window !== 'undefined' && window.innerWidth >= 768 && conversations.length > 0) {
       return conversations[0].id;
@@ -54,6 +66,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [reportTarget, setReportTarget] = useState<{ type: 'user'; attendee: AttendeeProfile } | null>(null);
   const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [quizModalOpen, setQuizModalOpen] = useState(false);
   const [viewingEventId, setViewingEventId] = useState<string | null>(null);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [blockTarget, setBlockTarget] = useState<{ id: string; name: string } | null>(null);
@@ -74,6 +87,12 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
   const prevConversationsRef = useRef(conversations);
   const toastTimerRef = useRef<number | null>(null);
 
+  useEffect(() => {
+    if (initialSubTab) {
+      setActiveSubTab(initialSubTab);
+    }
+  }, [initialSubTab]);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     if (toastTimerRef.current) {
@@ -93,10 +112,20 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
     };
   }, []);
 
-  // Keep selectedConversationId valid whenever conversations shrink (leave / block / report / cross-tab)
+  // Keep selectedConversationId valid whenever conversations change (add on accept or shrink on leave/block)
   useEffect(() => {
     const prevConvs = prevConversationsRef.current;
     prevConversationsRef.current = conversations;
+
+    // If a brand new conversation was prepended (e.g. after accepting a request), auto-select it
+    if (
+      conversations.length > prevConvs.length &&
+      conversations[0] &&
+      !prevConvs.some((c) => c.id === conversations[0].id)
+    ) {
+      setSelectedConversationId(conversations[0].id);
+      return;
+    }
 
     if (!selectedConversationId) return;
     const stillExists = conversations.some((c) => c.id === selectedConversationId);
@@ -188,6 +217,31 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
       !selectedConversation.isChatClosedPostEvent &&
       !isEventEnded
   );
+
+  const hasCompletedQuiz = Boolean(user?.personalityQuiz?.completed && user?.personalityQuiz?.answers);
+  const userArchetype = hasCompletedQuiz
+    ? user?.personalityQuiz?.archetype || computeBuddyArchetype(user?.personalityQuiz?.answers)
+    : null;
+
+  // Compute live Icebreaker Hook for the selected active chat so it always reflects the user's latest quiz
+  const selectedChatIcebreaker = selectedConversation
+    ? (() => {
+        const partnerProfile = allAttendees[selectedConversation.partner.id] || selectedConversation.partner;
+        const liveCompat = calculateCompatibility(
+          user?.personalityQuiz || DEFAULT_ALEX_QUIZ,
+          partnerProfile.personalityQuiz,
+          user,
+          partnerProfile,
+          eventSocialBattery[selectedConversation.eventId] || selectedConversation.socialBattery,
+          selectedConversation.eventId,
+          selectedConversation.eventTitle
+        );
+        return {
+          banner: selectedConversation.icebreakerBanner || liveCompat.icebreakerBanner,
+          question: selectedConversation.icebreakerQuestion || liveCompat.icebreakerQuestion
+        };
+      })()
+    : null;
 
   const dismissSafetyNote = () => {
     setSafetyDismissed(true);
@@ -287,7 +341,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
       )}
 
       {/* Header */}
-      <div className="flex items-center justify-between gap-3 pb-4 border-b border-line shrink-0">
+      <div className="flex items-center justify-between gap-3 pb-3.5 border-b border-line shrink-0">
         <h1 className="font-display text-2xl sm:text-3xl font-bold text-ink tracking-tight">
           Buddy Buzz
         </h1>
@@ -324,6 +378,58 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
         </div>
       </div>
 
+      {/* Buddy Archetype Badge + Retake Quiz Strip (or 30-second Onboarding Card) */}
+      {user && (
+        <div className="pt-3 shrink-0">
+          {hasCompletedQuiz && userArchetype ? (
+            <div className="px-4 py-2.5 bg-surface rounded-2xl border border-line shadow-soft flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent-soft border border-accent/40 text-xs font-bold text-ink shrink-0">
+                  <span aria-hidden="true">{userArchetype.emoji}</span>
+                  <span>{userArchetype.title}</span>
+                </span>
+                <span className="hidden sm:inline text-xs text-muted truncate">
+                  {userArchetype.summary}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setQuizModalOpen(true)}
+                className="px-3 py-1.5 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-bold inline-flex items-center gap-1.5 shadow-soft transition-colors cursor-pointer shrink-0"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Retake Personality Quiz</span>
+              </button>
+            </div>
+          ) : (
+            <div className="p-4 bg-surface rounded-2xl border border-accent/40 shadow-soft flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-accent-soft text-accent-text flex items-center justify-center shrink-0 mt-0.5">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <p className="font-display text-sm font-bold text-ink">
+                    Unlock your Buddy Archetype &amp; Icebreakers
+                  </p>
+                  <p className="text-xs text-muted mt-0.5">
+                    Take the 30-second personality quiz to get matched with Waterloo students who share your vibe.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setQuizModalOpen(true)}
+                className="self-start sm:self-center px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-bold shadow-soft transition-colors cursor-pointer shrink-0"
+              >
+                Take 30-Second Quiz
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {dailyBuddyRequestsCount >= maxDailyRequests && (
         <p className="text-xs text-muted pt-2.5 shrink-0">Daily limit reached.</p>
       )}
@@ -343,6 +449,25 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
                 const hasReasons = Boolean(req.compatibilityReasons && req.compatibilityReasons.length > 0);
                 const isMenuOpen = openMenuId === `req_${req.id}`;
                 const avatarSrc = safeMediaUrl(req.senderAvatar) || '';
+                const senderProfile = allAttendees[req.senderId];
+                const facultyYearLine = [
+                  req.senderFaculty || senderProfile?.faculty,
+                  req.senderYear || senderProfile?.year
+                ]
+                  .filter(Boolean)
+                  .join(' · ');
+
+                const computedIcebreakerPill =
+                  req.icebreakerPill ||
+                  calculateCompatibility(
+                    user?.personalityQuiz || DEFAULT_ALEX_QUIZ,
+                    senderProfile?.personalityQuiz,
+                    user,
+                    senderProfile,
+                    eventSocialBattery[req.eventId] || req.socialBattery,
+                    req.eventId,
+                    req.eventTitle
+                  ).icebreakerPill;
 
                 return (
                   <div
@@ -363,7 +488,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
                           referrerPolicy="no-referrer"
                           className="w-10 h-10 rounded-full object-cover ring-2 ring-accent shrink-0 bg-surface-soft"
                         />
-                        <div className="min-w-0 flex-1">
+                        <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-semibold text-sm text-ink truncate">
                               {req.senderName}
@@ -374,17 +499,26 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
                               </span>
                             )}
                           </div>
-                          <p className="text-xs text-muted truncate mt-0.5 flex items-center gap-1">
-                            <Calendar className="w-3 h-3 shrink-0 text-accent-text" />
-                            <span className="truncate">{req.eventTitle}</span>
-                            {hasReasons && (
-                              isExpanded ? (
-                                <ChevronUp className="w-3.5 h-3.5 shrink-0 ml-1" />
-                              ) : (
-                                <ChevronDown className="w-3.5 h-3.5 shrink-0 ml-1" />
-                              )
-                            )}
-                          </p>
+
+                          {facultyYearLine && (
+                            <p className="text-xs text-muted truncate">
+                              {facultyYearLine}
+                            </p>
+                          )}
+
+                          {req.eventTitle && (
+                            <p className="text-xs text-muted truncate flex items-center gap-1">
+                              <Calendar className="w-3 h-3 shrink-0 text-accent-text" />
+                              <span className="truncate">{req.eventTitle}</span>
+                              {hasReasons && (
+                                isExpanded ? (
+                                  <ChevronUp className="w-3.5 h-3.5 shrink-0 ml-1" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5 shrink-0 ml-1" />
+                                )
+                              )}
+                            </p>
+                          )}
                         </div>
                       </button>
 
@@ -401,6 +535,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
                           onClick={() => {
                             respondConnectionRequest(req.id, 'accept');
                             setActiveSubTab('conversations');
+                            showToast(`Connected with ${req.senderName}! Icebreaker pinned in chat.`);
                           }}
                           className="px-3.5 py-1.5 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-bold transition-colors shadow-soft cursor-pointer"
                         >
@@ -458,6 +593,16 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
                         </div>
                       </div>
                     </div>
+
+                    {/* Shared Icebreaker Hook Pill */}
+                    {computedIcebreakerPill && (
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent-soft border border-accent/35 text-xs font-semibold text-ink">
+                          <Sparkles className="w-3 h-3 text-accent-text shrink-0" />
+                          <span>{computedIcebreakerPill}</span>
+                        </span>
+                      </div>
+                    )}
 
                     {isExpanded && hasReasons && (
                       <div className="pt-2 border-t border-line flex flex-wrap gap-1.5 text-xs">
@@ -727,6 +872,29 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
                   </div>
                 </div>
 
+                {/* Pinned Icebreaker Hook Banner at the top of the chat */}
+                {selectedChatIcebreaker && (
+                  <div className="px-4 py-2.5 bg-accent-soft/85 border-b border-accent/35 shrink-0 space-y-1.5">
+                    <div className="flex items-start gap-2">
+                      <Sparkles className="w-3.5 h-3.5 text-accent-text shrink-0 mt-0.5" />
+                      <p className="text-xs text-ink font-medium leading-relaxed">
+                        {selectedChatIcebreaker.banner}
+                      </p>
+                    </div>
+                    {!closedComposerMessage && selectedChatIcebreaker.question && (
+                      <div className="flex items-center gap-2 pl-5">
+                        <button
+                          type="button"
+                          onClick={() => setInputText(selectedChatIcebreaker.question)}
+                          className="text-[11px] font-semibold text-accent-text hover:underline cursor-pointer text-left"
+                        >
+                          Ask: &ldquo;{selectedChatIcebreaker.question}&rdquo;
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* One-time dismissible safety note on brand-new chat */}
                 {isBrandNewChat && !safetyDismissed && (
                   <div className="px-4 py-1.5 bg-canvas border-b border-line text-xs text-muted flex items-center justify-between gap-2 shrink-0">
@@ -751,7 +919,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
                     if (isSystem) {
                       return (
                         <div key={msg.id} className="text-center py-1">
-                          <span className="text-xs text-muted bg-surface-soft px-3 py-1 rounded-xl">
+                          <span className="inline-block text-xs text-muted bg-surface-soft px-3 py-1 rounded-xl">
                             {msg.text}
                           </span>
                         </div>
@@ -927,6 +1095,16 @@ export const MessagesTab: React.FC<MessagesTabProps> = () => {
           }}
         />
       )}
+
+      {/* Personality Quiz Modal */}
+      <PersonalityQuizModal
+        isOpen={quizModalOpen}
+        onClose={() => setQuizModalOpen(false)}
+        onSuccess={() => {
+          setActiveSubTab('requests');
+          showToast('Buddy vibe updated! New match invitations ready.');
+        }}
+      />
 
       {/* Active Event Detail Modal */}
       {viewingEvent && (

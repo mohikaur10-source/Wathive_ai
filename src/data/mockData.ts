@@ -11,7 +11,7 @@ import {
   StudentDiscount,
   AdminAuditLog
 } from '../types';
-import { DEFAULT_ALEX_QUIZ } from '../utils/compatibilityEngine';
+import { DEFAULT_ALEX_QUIZ, computeBuddyArchetype } from '../utils/compatibilityEngine';
 import { toWaterlooUtcIso } from '../utils/timeZone';
 import waterlooGooseAvatar from '../assets/images/waterloo_goose_avatar_1794962499830.jpg';
 
@@ -56,16 +56,36 @@ export const SAMPLE_ATTENDEES: Record<string, AttendeeProfile> = {
     program: 'Biomedical Engineering',
     year: '2nd Year',
     bio: 'Avid runner and coffee drinker. Looking to check out tech clubs and meetups this term!',
+    gender: 'woman',
+    defaultSocialBattery: 'Chill & Observing',
+    traits: {
+      alcoholFree: true,
+      strictlyPlatonic: true,
+      studyFocused: true,
+      punctual: true,
+      livesOnCampus: true,
+      commuterFriendly: false,
+      prefersGroup: false
+    },
     showFaculty: true,
     showYear: true,
     isVerifiedUWStudent: true,
     personalityQuiz: {
       completed: true,
-      socialEnergy: 'introvert',
-      socialEnvironment: 'cozy_relaxed',
-      hobbies: ['Tech & Coding', 'Foodie & Cafes', 'Running & Fitness', 'Board Games & Trivia'],
-      groupSize: 'duo',
-      experienceTypes: ['Casual Conversations', 'Hands-on Building', 'Exploring Food Stalls']
+      answers: {
+        q1: 'B',
+        q2: 'B',
+        q3: 'A',
+        q4: 'A',
+        q5: 'B',
+        q6: 'B',
+        q7: 'B',
+        q8: 'B'
+      },
+      preferenceBubbles: ['Alcohol-free hangouts', 'Strictly platonic', 'Punctual / No flakes'],
+      archetype: computeBuddyArchetype({
+        q1: 'B', q2: 'B', q3: 'A', q4: 'A', q5: 'B', q6: 'B', q7: 'B', q8: 'B'
+      })
     }
   },
   marcus_zhao: {
@@ -76,16 +96,36 @@ export const SAMPLE_ATTENDEES: Record<string, AttendeeProfile> = {
     program: 'Environment and Business',
     year: '4th Year',
     bio: 'Wrapping up undergrad! Big fan of sustainability projects, trivia, and career mixers.',
+    gender: 'man',
+    defaultSocialBattery: 'Hyped & Chatty',
+    traits: {
+      alcoholFree: false,
+      strictlyPlatonic: true,
+      studyFocused: false,
+      punctual: true,
+      livesOnCampus: false,
+      commuterFriendly: true,
+      prefersGroup: true
+    },
     showFaculty: true,
     showYear: true,
     isVerifiedUWStudent: true,
     personalityQuiz: {
       completed: true,
-      socialEnergy: 'ambivert',
-      socialEnvironment: 'interactive_workshop',
-      hobbies: ['Sustainability & Nature', 'Foodie & Cafes', 'Board Games & Trivia', 'Entrepreneurship'],
-      groupSize: 'small_pod',
-      experienceTypes: ['Casual Conversations', 'Networking & Career Prep', 'Hands-on Building']
+      answers: {
+        q1: 'A',
+        q2: 'A',
+        q3: 'B',
+        q4: 'A',
+        q5: 'A',
+        q6: 'A',
+        q7: 'A',
+        q8: 'B'
+      },
+      preferenceBubbles: ['Group match (3–4 people)', 'Commuter-friendly'],
+      archetype: computeBuddyArchetype({
+        q1: 'A', q2: 'A', q3: 'B', q4: 'A', q5: 'A', q6: 'A', q7: 'A', q8: 'B'
+      })
     }
   },
   chloe_tremblay: {
@@ -96,16 +136,36 @@ export const SAMPLE_ATTENDEES: Record<string, AttendeeProfile> = {
     program: 'Psychology',
     year: '1st Year',
     bio: 'First year at Waterloo! A bit shy in big crowds so excited to pair up for social gatherings.',
+    gender: 'woman',
+    defaultSocialBattery: "Just don't want to walk alone",
+    traits: {
+      alcoholFree: true,
+      strictlyPlatonic: true,
+      studyFocused: true,
+      punctual: true,
+      livesOnCampus: true,
+      commuterFriendly: true,
+      prefersGroup: false
+    },
     showFaculty: true,
     showYear: true,
     isVerifiedUWStudent: true,
     personalityQuiz: {
       completed: true,
-      socialEnergy: 'introvert',
-      socialEnvironment: 'cozy_relaxed',
-      hobbies: ['Arts & Crafts', 'Anime & Cinema', 'Reading & Writing', 'Foodie & Cafes'],
-      groupSize: 'duo',
-      experienceTypes: ['Casual Conversations', 'Chill Observation', 'Creative Making']
+      answers: {
+        q1: 'B',
+        q2: 'B',
+        q3: 'C',
+        q4: 'B',
+        q5: 'B',
+        q6: 'B',
+        q7: 'B',
+        q8: 'A'
+      },
+      preferenceBubbles: ['Women only', 'Alcohol-free hangouts', 'Lives on campus'],
+      archetype: computeBuddyArchetype({
+        q1: 'B', q2: 'B', q3: 'C', q4: 'B', q5: 'B', q6: 'B', q7: 'B', q8: 'A'
+      })
     }
   },
   liam_campbell: {
@@ -116,16 +176,36 @@ export const SAMPLE_ATTENDEES: Record<string, AttendeeProfile> = {
     program: 'Mechatronics Engineering',
     year: '3rd Year',
     bio: 'Hardware tinkerer, robotics mentor, and intramural volleyball setter.',
+    gender: 'man',
+    defaultSocialBattery: 'Strictly Networking',
+    traits: {
+      alcoholFree: true,
+      strictlyPlatonic: true,
+      studyFocused: true,
+      punctual: true,
+      livesOnCampus: true,
+      commuterFriendly: false,
+      prefersGroup: true
+    },
     showFaculty: true,
     showYear: true,
     isVerifiedUWStudent: true,
     personalityQuiz: {
       completed: true,
-      socialEnergy: 'ambivert',
-      socialEnvironment: 'active_movement',
-      hobbies: ['Tech & Coding', 'Racquet Sports & Intramurals', 'Gaming & Esports'],
-      groupSize: 'small_pod',
-      experienceTypes: ['Hands-on Building', 'Cheering / Sports']
+      answers: {
+        q1: 'A',
+        q2: 'A',
+        q3: 'A',
+        q4: 'C',
+        q5: 'A',
+        q6: 'A',
+        q7: 'A',
+        q8: 'A'
+      },
+      preferenceBubbles: ['Group match (3–4 people)', 'Punctual / No flakes', 'Study-focused'],
+      archetype: computeBuddyArchetype({
+        q1: 'A', q2: 'A', q3: 'A', q4: 'C', q5: 'A', q6: 'A', q7: 'A', q8: 'A'
+      })
     }
   },
   priya_sharma: {
@@ -136,16 +216,76 @@ export const SAMPLE_ATTENDEES: Record<string, AttendeeProfile> = {
     program: 'Biochemistry',
     year: '2nd Year',
     bio: 'Pre-med student who loves film screenings and campus pottery workshops.',
+    gender: 'woman',
+    defaultSocialBattery: 'Chill & Observing',
+    traits: {
+      alcoholFree: true,
+      strictlyPlatonic: true,
+      studyFocused: true,
+      punctual: true,
+      livesOnCampus: false,
+      commuterFriendly: true,
+      prefersGroup: true
+    },
     showFaculty: true,
     showYear: true,
     isVerifiedUWStudent: true,
     personalityQuiz: {
       completed: true,
-      socialEnergy: 'introvert',
-      socialEnvironment: 'interactive_workshop',
-      hobbies: ['Foodie & Cafes', 'Arts & Crafts', 'Sustainability & Nature'],
-      groupSize: 'duo',
-      experienceTypes: ['Academic Deep Dives', 'Chill Observation']
+      answers: {
+        q1: 'B',
+        q2: 'B',
+        q3: 'A',
+        q4: 'B',
+        q5: 'B',
+        q6: 'B',
+        q7: 'A',
+        q8: 'A'
+      },
+      preferenceBubbles: ['Alcohol-free hangouts', 'Study-focused', 'Commuter-friendly'],
+      archetype: computeBuddyArchetype({
+        q1: 'B', q2: 'B', q3: 'A', q4: 'B', q5: 'B', q6: 'B', q7: 'A', q8: 'A'
+      })
+    }
+  },
+  sarah_kim: {
+    id: 'sarah_kim',
+    name: 'Sarah K.',
+    avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=256&q=80',
+    faculty: 'Mathematics',
+    program: 'Computer Science',
+    year: '3rd Year',
+    bio: '3rd year CS student who loves midnight Plaza shawarma runs, hackathons, and quiet study cafes.',
+    gender: 'woman',
+    defaultSocialBattery: 'Chill & Observing',
+    traits: {
+      alcoholFree: true,
+      strictlyPlatonic: true,
+      studyFocused: true,
+      punctual: true,
+      livesOnCampus: true,
+      commuterFriendly: true,
+      prefersGroup: true
+    },
+    showFaculty: true,
+    showYear: true,
+    isVerifiedUWStudent: true,
+    personalityQuiz: {
+      completed: true,
+      answers: {
+        q1: 'B',
+        q2: 'B',
+        q3: 'C',
+        q4: 'A',
+        q5: 'A',
+        q6: 'A',
+        q7: 'B',
+        q8: 'B'
+      },
+      preferenceBubbles: ['Same faculty', 'Alcohol-free hangouts', 'Strictly platonic'],
+      archetype: computeBuddyArchetype({
+        q1: 'B', q2: 'B', q3: 'C', q4: 'A', q5: 'A', q6: 'A', q7: 'B', q8: 'B'
+      })
     }
   }
 };
@@ -259,18 +399,18 @@ export const INITIAL_EVENTS: EventItem[] = [];
 
 // Mapping of which sample attendees are going to which events (with openToMeeting: true)
 export const INITIAL_EVENT_ATTENDEES: Record<string, string[]> = {
-  'wusa_247403': ['maya_patel', 'marcus_zhao'], // Know Your Rights Before You Sign the Lease
-  'wusa_249666': ['chloe_tremblay', 'priya_sharma'], // Mates X Counselling Services Stress Workshop
-  'wusa_250173': ['maya_patel', 'chloe_tremblay', 'liam_campbell'], // Roshni Diwali Musical Celebration
-  'wusa_244843': ['liam_campbell', 'marcus_zhao'], // Fruit & Veggie Market (Nov 25)
+  'wusa_247403': ['maya_patel', 'sarah_kim', 'marcus_zhao'], // Know Your Rights Before You Sign the Lease
+  'wusa_249666': ['chloe_tremblay', 'priya_sharma', 'sarah_kim'], // Mates X Counselling Services Stress Workshop
+  'wusa_250173': ['maya_patel', 'chloe_tremblay', 'liam_campbell', 'sarah_kim'], // Roshni Diwali Musical Celebration
+  'wusa_244843': ['liam_campbell', 'marcus_zhao', 'sarah_kim'], // Fruit & Veggie Market (Nov 25)
   'wusa_250216': ['chloe_tremblay', 'priya_sharma'], // Makeup Night at Glow Centre
-  'wusa_246689': ['priya_sharma', 'chloe_tremblay'], // Accounting Conference
-  'wusa_249683': ['liam_campbell', 'marcus_zhao'], // Trivia Night @ The Bomber
-  'wusa_247753': ['maya_patel', 'chloe_tremblay'], // Winter Warm-Up Event (Dec 5)
+  'wusa_246689': ['priya_sharma', 'chloe_tremblay', 'sarah_kim'], // Accounting Conference
+  'wusa_249683': ['liam_campbell', 'marcus_zhao', 'maya_patel'], // Trivia Night @ The Bomber
+  'wusa_247753': ['maya_patel', 'chloe_tremblay', 'sarah_kim'], // Winter Warm-Up Event (Dec 5)
   'wusa_244717': ['marcus_zhao', 'liam_campbell'], // Lady Rev Classic Invitational
   'wusa_245612': ['maya_patel', 'priya_sharma'],
-  'wusa_246355': ['marcus_zhao', 'liam_campbell'],
-  'wusa_244841': ['liam_campbell', 'marcus_zhao']
+  'wusa_246355': ['marcus_zhao', 'liam_campbell', 'maya_patel'],
+  'wusa_244841': ['liam_campbell', 'marcus_zhao', 'sarah_kim']
 };
 
 export const INITIAL_USER_ATTENDING = ['wusa_247403', 'wusa_244843'];
@@ -278,7 +418,7 @@ export const INITIAL_USER_SAVED = ['wusa_250173', 'wusa_246689', 'wusa_249683'];
 // Buddy matching is strictly OFF by default per event. Users must explicitly preview and opt in.
 export const INITIAL_USER_VISIBILITY: Record<string, boolean> = {};
 
-// Initial incoming request for Alex from Maya for Bingeman's Screampark Trip
+// Initial incoming requests for Alex with Icebreaker Hooks
 export const INITIAL_REQUESTS: ConnectionRequest[] = [
   {
     id: 'req_maya_screampark',
@@ -293,13 +433,17 @@ export const INITIAL_REQUESTS: ConnectionRequest[] = [
     senderYear: SAMPLE_ATTENDEES.maya_patel.year,
     recipientId: 'user_alex_chen',
     recipientName: 'Alex C.',
-    introMessage: "Hey Alex! I noticed you are going to the Bingeman's Screampark Trip with ICSN. None of my roommates are free this Friday evening—would you want to take the shuttle and explore the haunts together?",
-    compatibilityScore: 94,
+    introMessage: "Hey Alex! None of my roommates are free this evening—would you want to head over together?",
+    compatibilityScore: 95,
     compatibilityReasons: [
-      'Both recharge in calmer, low-pressure settings',
-      'Common hobbies: Tech & Coding, Foodie & Cafes, Running & Fitness',
-      'Both specifically looking for a 1-on-1 buddy duo to walk in with'
+      'You both picked Midnight Shawarma & Chill Cafe',
+      'Matched energy: Chill & Observing',
+      'Matches preferences: Strictly platonic, Punctual / No flakes'
     ],
+    icebreakerPill: 'You both picked Midnight Shawarma & Chill Cafe',
+    icebreakerBanner: "Icebreaker: You both prefer midnight shawarma & late-night hangs and chill cafe hangouts. Ask them what they're most excited for!",
+    icebreakerQuestion: "Important Waterloo question: Lazeez, Osmow’s, or Shawerma Plus?",
+    socialBattery: 'Chill & Observing',
     status: 'pending',
     createdAt: '2026-10-21T10:15:00Z'
   }
@@ -320,7 +464,11 @@ export const INITIAL_CONVERSATIONS: Conversation[] = [
     isReported: false,
     stayConnectedUser: false,
     stayConnectedPartner: false,
-    isChatClosedPostEvent: false
+    isChatClosedPostEvent: false,
+    icebreakerPill: 'You both picked Midnight Shawarma & Trying New Things',
+    icebreakerBanner: "Icebreaker: You both prefer midnight shawarma & late-night hangs and trying new activities. Ask them what they're most excited for!",
+    icebreakerQuestion: "Important Waterloo question: Lazeez, Osmow’s, or Shawerma Plus?",
+    socialBattery: 'Hyped & Chatty'
   }
 ];
 

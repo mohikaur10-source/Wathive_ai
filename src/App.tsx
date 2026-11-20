@@ -14,7 +14,13 @@ const AppContent: React.FC = () => {
   const [view, setView] = useState<'landing' | 'app'>('landing');
   const [landingEntryKey, setLandingEntryKey] = useState(0);
   const [activeTab, setActiveTab] = useState<NavTab>('feed');
+  const [messagesSubTab, setMessagesSubTab] = useState<'conversations' | 'requests'>('conversations');
   const [authModalOpen, setAuthModalOpen] = useState(false);
+
+  const navigateToMessages = (subTab: 'conversations' | 'requests' = 'conversations') => {
+    setMessagesSubTab(subTab);
+    setActiveTab('messages');
+  };
 
   const handleEnterApp = () => {
     setView('app');
@@ -51,7 +57,7 @@ const AppContent: React.FC = () => {
       <main className="flex-1 flex flex-col min-w-0 px-4 sm:px-6 lg:px-8 py-6 pb-24 md:pb-12 max-w-[1380px] mx-auto w-full">
         {activeTab === 'feed' && (
           <FeedTab
-            onNavigateToMessages={() => setActiveTab('messages')}
+            onNavigateToMessages={navigateToMessages}
             onOpenPreferences={() => setActiveTab('profile')}
             onOpenProfile={() => setActiveTab('profile')}
             onOpenAuth={() => setAuthModalOpen(true)}
@@ -60,14 +66,16 @@ const AppContent: React.FC = () => {
 
         {activeTab === 'calendar' && (
           <CalendarNotificationsTab
-            onNavigateToMessages={() => setActiveTab('messages')}
+            onNavigateToMessages={navigateToMessages}
             onNavigateToFeed={() => setActiveTab('feed')}
           />
         )}
 
-        {activeTab === 'messages' && <MessagesTab />}
+        {activeTab === 'messages' && <MessagesTab initialSubTab={messagesSubTab} />}
 
-        {activeTab === 'profile' && <ProfileTab />}
+        {activeTab === 'profile' && (
+          <ProfileTab onNavigateToMessages={navigateToMessages} />
+        )}
       </main>
 
       <AuthModal

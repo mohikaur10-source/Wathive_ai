@@ -31,13 +31,55 @@ export type SocialEnvironment =
   | 'active_movement';
 export type GroupSizePreference = 'duo' | 'small_pod' | 'larger_group' | 'flexible';
 
+export type SocialBatteryTag =
+  | 'Hyped & Chatty'
+  | 'Chill & Observing'
+  | 'Strictly Networking'
+  | "Just don't want to walk alone";
+
+export type BuddyPreferenceTag =
+  | 'Women only'
+  | 'Men only'
+  | 'Group match (3–4 people)'
+  | 'Same faculty'
+  | 'Outside my faculty'
+  | 'Same year'
+  | 'Alcohol-free hangouts'
+  | 'Strictly platonic'
+  | 'Study-focused'
+  | 'Punctual / No flakes'
+  | 'Lives on campus'
+  | 'Commuter-friendly';
+
+export interface BuddyQuizAnswers {
+  q1: 'A' | 'B';
+  q2: 'A' | 'B';
+  q3: 'A' | 'B' | 'C';
+  q4: 'A' | 'B' | 'C';
+  q5: 'A' | 'B';
+  q6: 'A' | 'B';
+  q7: 'A' | 'B';
+  q8: 'A' | 'B';
+}
+
+export interface BuddyArchetype {
+  id: string;
+  title: string;
+  emoji: string;
+  summary: string;
+}
+
 export interface PersonalityQuizProfile {
   completed: boolean;
-  socialEnergy: SocialEnergy;
-  socialEnvironment: SocialEnvironment;
-  hobbies: string[];
-  groupSize: GroupSizePreference;
-  experienceTypes: string[];
+  answers?: BuddyQuizAnswers;
+  preferenceBubbles?: BuddyPreferenceTag[];
+  archetype?: BuddyArchetype;
+  // Legacy optional fields retained for safe migration from older stored state
+  socialEnergy?: SocialEnergy;
+  socialEnvironment?: SocialEnvironment;
+  hobbies?: string[];
+  groupSize?: GroupSizePreference;
+  experienceTypes?: string[];
   updatedAt?: string;
 }
 
@@ -50,6 +92,22 @@ export interface CompatibilityMatch {
   socialEnergyAlignment: string;
   environmentAlignment: string;
   groupAlignment: string;
+  icebreakerPill: string;
+  icebreakerBanner: string;
+  icebreakerQuestion: string;
+  quizScore: number;
+  batteryScore: number;
+  preferenceScore: number;
+  filteredOut?: boolean;
+  filteredOutReason?: string;
+}
+
+export type SavedFilterType = 'category' | 'faculty' | 'location' | 'price';
+
+export interface EventFilterTag {
+  type: SavedFilterType;
+  value: string;
+  label: string;
 }
 
 export interface UserPreferences {
@@ -181,6 +239,16 @@ export interface EventItem {
   };
 }
 
+export interface AttendeeTraits {
+  alcoholFree?: boolean;
+  strictlyPlatonic?: boolean;
+  studyFocused?: boolean;
+  punctual?: boolean;
+  livesOnCampus?: boolean;
+  commuterFriendly?: boolean;
+  prefersGroup?: boolean;
+}
+
 export interface AttendeeProfile {
   id: string;
   name: string; // First name and last initial only (e.g. "Maya P.")
@@ -189,6 +257,10 @@ export interface AttendeeProfile {
   program?: string;
   year?: string;
   bio?: string;
+  gender?: 'woman' | 'man' | 'non_binary';
+  traits?: AttendeeTraits;
+  defaultSocialBattery?: SocialBatteryTag;
+  eventSocialBatteries?: Record<string, SocialBatteryTag>;
   showFaculty?: boolean;
   showYear?: boolean;
   isVerifiedUWStudent: boolean;
@@ -211,6 +283,10 @@ export interface ConnectionRequest {
   introMessage?: string;
   compatibilityScore?: number;
   compatibilityReasons?: string[];
+  icebreakerPill?: string;
+  icebreakerBanner?: string;
+  icebreakerQuestion?: string;
+  socialBattery?: SocialBatteryTag;
   status: 'pending' | 'accepted' | 'declined' | 'withdrawn' | 'expired';
   createdAt: string;
 }
@@ -246,6 +322,10 @@ export interface Conversation {
   stayConnectedUser?: boolean; // User choice post-event
   stayConnectedPartner?: boolean; // Partner choice post-event
   isChatClosedPostEvent?: boolean; // Closed if 48h passed without mutual choice
+  icebreakerPill?: string;
+  icebreakerBanner?: string;
+  icebreakerQuestion?: string;
+  socialBattery?: SocialBatteryTag;
 }
 
 export interface ReportSubmission {

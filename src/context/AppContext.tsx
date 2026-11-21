@@ -89,6 +89,8 @@ interface AppContextType {
   connectionRequests: ConnectionRequest[];
   conversations: Conversation[];
   chatMessages: Record<string, ChatMessage[]>;
+  typingConversationIds: Record<string, boolean>;
+  chatErrors: Record<string, string>;
   blockedUserIds: string[];
   removedChats: RemovedChatRecord[];
   reportedUserIds: string[];
@@ -325,6 +327,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     removedChats,
     blockedUserIds
   } = chatStore;
+
+  const [typingConversationIds, setTypingConversationIds] = useState<Record<string, boolean>>({});
+  const [chatErrors, setChatErrors] = useState<Record<string, string>>({});
+  const chatReplySeqRef = React.useRef<Record<string, number>>({});
 
   const [reportedUserIds, setReportedUserIds] = useState<string[]>(
     initialCached?.reportedUserIds || []
@@ -1203,7 +1209,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         eventDate: req.eventDate,
         eventLocation: 'Campus Venue',
         partner,
-        lastMessage: req.introMessage || `Icebreaker: ${icebreakerQuestion}`,
+        lastMessage: req.introMessage || `Hey ${partner.name}! Excited to check out ${req.eventTitle} together!`,
         lastMessageTime: 'Just now',
         unreadCount: 0,
         isReported: false,
@@ -1217,13 +1223,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
 
       const msgs: ChatMessage[] = [
-        {
-          id: `m_ice_${Date.now()}`,
-          conversationId: convId,
-          senderId: 'system',
-          text: `Icebreaker prompt: ${icebreakerQuestion}`,
-          timestamp: 'Just now'
-        },
         ...(req.introMessage
           ? [
               {
@@ -1310,12 +1309,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const sendMessage = (conversationId: string, text: string) => {
-    if (!user || !text.trim()) return;
+    const trimmed = text.trim();
+    if (!user || !trimmed) return;
 
     const conv = conversations.find((c) => c.id === conversationId);
     if (
       !conv ||
-      conv.isChatClosedPostEvent ||
       isPartnerBlockedOrReported(conv.partner.id, removedChats, blockedUserIds)
     ) {
       return;
@@ -1325,9 +1324,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `m_${Date.now()}`,
       conversationId,
       senderId: user.id,
-      text: text.trim(),
+      text: trimmed,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
+
+    const priorMsgs = chatMessages[conversationId] || [];
+    const historyPayload = [...priorMsgs, newMsg]
+      .filter((m) => m.senderId !== 'system')
+      .slice(-16)
+      .map((m) => ({
+        role: m.senderId === user.id ? ('user' as const) : ('partner' as const),
+        text: m.text
+      }));
 
     updateChatStoreAndPersist((prev) => {
       if (!prev.conversations.some((c) => c.id === conversationId)) return prev;
@@ -1339,46 +1347,112 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
         conversations: prev.conversations.map((c) =>
           c.id === conversationId
-            ? { ...c, lastMessage: text.trim(), lastMessageTime: 'Just now' }
+            ? { ...c, lastMessage: trimmed, lastMessageTime: 'Just now' }
             : c
         )
       };
     });
 
-    // Realistic partner reply (only if conversation still exists after delay)
-    setTimeout(() => {
-      const partnerReplies = [
-        "Sounds like a plan! Let's meet right at the registration desk about 10 minutes before.",
-        "That works for me! So glad we got matched up based on our personality quiz.",
-        "It's my first time attending this event too, so having a buddy is super reassuring!",
-        "Perfect, see you there by the main entrance!"
-      ];
-      const randomReply = partnerReplies[Math.floor(Math.random() * partnerReplies.length)];
+    const seq = (chatReplySeqRef.current[conversationId] || 0) + 1;
+    chatReplySeqRef.current[conversationId] = seq;
 
-      const replyMsg: ChatMessage = {
-        id: `m_rep_${Date.now()}`,
-        conversationId,
-        senderId: conv.partner.id,
-        text: randomReply,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
+    setChatErrors((prev) => {
+      if (!prev[conversationId]) return prev;
+      const next = { ...prev };
+      delete next[conversationId];
+      return next;
+    });
+    setTypingConversationIds((prev) => ({ ...prev, [conversationId]: true }));
 
-      updateChatStoreAndPersist((prev) => {
-        if (!prev.conversations.some((c) => c.id === conversationId)) return prev;
-        return {
-          ...prev,
-          chatMessages: {
-            ...prev.chatMessages,
-            [conversationId]: [...(prev.chatMessages[conversationId] || []), replyMsg]
-          },
-          conversations: prev.conversations.map((c) =>
-            c.id === conversationId
-              ? { ...c, lastMessage: randomReply, lastMessageTime: 'Just now' }
-              : c
-          )
+    const partnerProfile = SAMPLE_ATTENDEES[conv.partner.id] || conv.partner;
+    const isEnded = !upcomingEvents.some((e) => e.id === conv.eventId);
+
+    void (async () => {
+      try {
+        const res = await fetch('/api/chat/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            latestMessage: trimmed,
+            history: historyPayload,
+            partner: {
+              name: partnerProfile.name,
+              faculty: partnerProfile.faculty,
+              program: partnerProfile.program,
+              year: partnerProfile.year,
+              bio: partnerProfile.bio,
+              socialBattery:
+                partnerProfile.eventSocialBatteries?.[conv.eventId] ||
+                partnerProfile.defaultSocialBattery ||
+                conv.socialBattery
+            },
+            user: {
+              name: formatPublicName(user.name),
+              faculty: user.faculty,
+              program: user.program,
+              year: user.year
+            },
+            event: {
+              title: conv.eventTitle,
+              location: conv.eventLocation,
+              date: conv.eventDate,
+              isEnded
+            }
+          })
+        });
+
+        const data = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          reply?: string;
+          error?: string;
         };
-      });
-    }, 1800);
+
+        if (chatReplySeqRef.current[conversationId] !== seq) return;
+
+        setTypingConversationIds((prev) => ({ ...prev, [conversationId]: false }));
+
+        if (!res.ok || !data.success || !data.reply) {
+          setChatErrors((prev) => ({
+            ...prev,
+            [conversationId]:
+              data.error || 'Could not get a reply right now. Please try again.'
+          }));
+          return;
+        }
+
+        const replyText = data.reply.trim();
+        const replyMsg: ChatMessage = {
+          id: `m_rep_${Date.now()}`,
+          conversationId,
+          senderId: conv.partner.id,
+          text: replyText,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        };
+
+        updateChatStoreAndPersist((prev) => {
+          if (!prev.conversations.some((c) => c.id === conversationId)) return prev;
+          return {
+            ...prev,
+            chatMessages: {
+              ...prev.chatMessages,
+              [conversationId]: [...(prev.chatMessages[conversationId] || []), replyMsg]
+            },
+            conversations: prev.conversations.map((c) =>
+              c.id === conversationId
+                ? { ...c, lastMessage: replyText, lastMessageTime: 'Just now' }
+                : c
+            )
+          };
+        });
+      } catch {
+        if (chatReplySeqRef.current[conversationId] !== seq) return;
+        setTypingConversationIds((prev) => ({ ...prev, [conversationId]: false }));
+        setChatErrors((prev) => ({
+          ...prev,
+          [conversationId]: 'Network error — could not get a reply. Please try again.'
+        }));
+      }
+    })();
   };
 
   const blockUser = (userId: string) => {
@@ -1781,6 +1855,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         connectionRequests,
         conversations,
         chatMessages,
+        typingConversationIds,
+        chatErrors,
         blockedUserIds,
         removedChats,
         reportedUserIds,

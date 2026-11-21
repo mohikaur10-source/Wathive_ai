@@ -492,6 +492,137 @@ export function generateIcebreakerHooks(
   };
 }
 
+export interface ConversationStartersData {
+  similarities: string[];
+  prompts: string[];
+}
+
+function capitalizeFirst(text: string): string {
+  if (!text) return text;
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * Generates shared similarities and tailored clickable message starters
+ * for an active chat, shown only when the user opens "Conversation starters".
+ */
+export function getConversationStarters(
+  rawUserQuiz?: PersonalityQuizProfile,
+  rawPartnerQuiz?: PersonalityQuizProfile,
+  userProfile?: UserProfile | null,
+  partnerProfile?: AttendeeProfile | null,
+  eventSocialBattery?: SocialBatteryTag,
+  eventId?: string,
+  eventTitle?: string,
+  isEventEnded = false
+): ConversationStartersData {
+  const userQuiz = normalizeQuizProfile(rawUserQuiz);
+  const partnerQuiz = normalizeQuizProfile(rawPartnerQuiz);
+  const userAnswers = userQuiz?.answers;
+  const partnerAnswers = partnerQuiz?.answers;
+
+  const similarities: string[] = [];
+  const prompts: string[] = [];
+
+  const addSimilarity = (label: string) => {
+    const clean = label.trim();
+    if (clean && !similarities.includes(clean)) {
+      similarities.push(clean);
+    }
+  };
+
+  const addPrompt = (prompt: string) => {
+    const clean = prompt.trim();
+    if (clean && !prompts.includes(clean)) {
+      prompts.push(clean);
+    }
+  };
+
+  if (userAnswers && partnerAnswers) {
+    const priorityOrder: QuizQuestionKey[] = ['q8', 'q1', 'q4', 'q2', 'q3', 'q7', 'q5', 'q6'];
+    for (const qId of priorityOrder) {
+      if (userAnswers[qId] === partnerAnswers[qId]) {
+        const opt = getOptionMeta(qId, userAnswers[qId]);
+        if (opt) {
+          addSimilarity(capitalizeFirst(opt.bannerPhrase));
+          addPrompt(opt.conversationPrompt);
+        }
+      }
+    }
+
+    const hasTalkerListenerPair =
+      (userAnswers.q6 === 'A' && partnerAnswers.q6 === 'B') ||
+      (userAnswers.q6 === 'B' && partnerAnswers.q6 === 'A');
+    if (hasTalkerListenerPair && similarities.length < 3) {
+      addSimilarity('Balanced talker + listener vibe');
+    }
+  }
+
+  // Event-specific social battery alignment
+  const effectiveUserBattery = eventSocialBattery || inferDefaultSocialBattery(userAnswers);
+  const effectivePartnerBattery =
+    (eventId && partnerProfile?.eventSocialBatteries?.[eventId]) ||
+    partnerProfile?.defaultSocialBattery ||
+    inferDefaultSocialBattery(partnerAnswers);
+
+  if (effectiveUserBattery && effectivePartnerBattery && effectiveUserBattery === effectivePartnerBattery) {
+    addSimilarity(`Same vibe: ${effectiveUserBattery}`);
+  }
+
+  // Faculty & year overlap
+  if (userProfile?.faculty && partnerProfile?.faculty && userProfile.faculty === partnerProfile.faculty) {
+    addSimilarity(`Both in ${userProfile.faculty}`);
+    if (prompts.length < 3) {
+      addPrompt(`How are your ${userProfile.faculty} courses going this term?`);
+    }
+  }
+
+  if (userProfile?.year && partnerProfile?.year && userProfile.year === partnerProfile.year) {
+    addSimilarity(`Both in ${userProfile.year}`);
+  }
+
+  // Soft buddy preference overlap
+  const dealbreakerResult = evaluateDealbreakers(
+    userQuiz?.preferenceBubbles || [],
+    userProfile,
+    partnerProfile
+  );
+  for (const tag of dealbreakerResult.softMatched) {
+    if (similarities.length < 4) {
+      addSimilarity(tag);
+    }
+  }
+
+  if (similarities.length === 0) {
+    addSimilarity('Both verified UWaterloo students');
+  }
+
+  // Ensure at least 2 helpful, context-aware message starters
+  const firstName = partnerProfile?.name ? partnerProfile.name.trim().split(/\s+/)[0] : '';
+  if (prompts.length < 2) {
+    if (isEventEnded) {
+      addPrompt(
+        eventTitle
+          ? `Hey${firstName ? ` ${firstName}` : ''}! How did you find ${eventTitle}?`
+          : `Hey${firstName ? ` ${firstName}` : ''}! How has your week on campus been going?`
+      );
+      addPrompt('Any other campus events on your radar this week?');
+    } else {
+      addPrompt(
+        eventTitle
+          ? `Hey${firstName ? ` ${firstName}` : ''}! What are you most excited to check out at ${eventTitle}?`
+          : "Hey! What campus events are you most excited for this week?"
+      );
+      addPrompt('Want to meet up nearby a few minutes before it starts?');
+    }
+  }
+
+  return {
+    similarities: similarities.slice(0, 4),
+    prompts: prompts.slice(0, 3)
+  };
+}
+
 /**
  * Evaluates strict dealbreaker tags from preferenceBubbles.
  * Returns { passes: false, reason } if a strict preference is violated.

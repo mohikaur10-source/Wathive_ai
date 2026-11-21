@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import crypto from 'node:crypto';
 import express from 'express';
 import helmet from 'helmet';
@@ -8,6 +9,7 @@ import { db } from './server/db.js';
 import { collector } from './server/wusaCollector.js';
 import { scheduler } from './server/scheduler.js';
 import { mapToWatHiveEventItem } from './server/previewMapper.js';
+import { ChatReplyError, generateBuddyChatReply } from './server/geminiChat.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -82,6 +84,15 @@ const adminSyncLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Admin sync rate limit exceeded.' }
+});
+
+// Rate limit for real-time buddy chat replies (~30 req/min/IP)
+const chatReplyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Slow down a bit — too many messages sent.' }
 });
 
 function isTimingSafeSecretMatch(provided: string, expected: string): boolean {
@@ -166,6 +177,22 @@ app.post('/api/admin/sync', adminSyncLimiter, requireAdminSecret, async (_req, r
   }
 });
 
+// 4. Real-time contextual buddy chat reply
+app.post('/api/chat/reply', chatReplyLimiter, async (req, res) => {
+  try {
+    const reply = await generateBuddyChatReply(req.body);
+    res.json({ success: true, reply });
+  } catch (err) {
+    if (err instanceof ChatReplyError) {
+      return res.status(err.statusCode).json({ success: false, error: err.message });
+    }
+    return res.status(500).json({
+      success: false,
+      error: 'Could not generate a reply right now. Please try again.'
+    });
+  }
+});
+
 // Return JSON 404 for unknown /api routes
 app.all('/api/*', (_req, res) => {
   res.status(404).json({ success: false, error: 'Not found' });
@@ -181,15 +208,71 @@ async function startServer() {
   let viteServer: { close: () => Promise<void> } | null = null;
 
   if (isDev) {
+    const disableHmr = process.env.DISABLE_HMR === 'true';
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       appType: 'spa',
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer }
+        hmr: disableHmr ? false : true,
+        ws: disableHmr ? false : { server: httpServer }
       }
     });
     viteServer = vite;
+
+    // In Vite 8 middlewareMode, /@vite/client still attempts a WebSocket connection on port 24678
+    // even when hmr/ws are false. Serve a clean zero-WebSocket shim when HMR is disabled.
+    if (disableHmr) {
+      const viteClientNoopShim = `
+const sheetsMap = new Map();
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    document.head.appendChild(style);
+    sheetsMap.set(id, style);
+  } else if (style.textContent !== content) {
+    style.textContent = content;
+  }
+}
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style) {
+    style.remove();
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  const noop = () => {};
+  return {
+    data: {},
+    accept: noop,
+    acceptExports: noop,
+    dispose: noop,
+    prune: noop,
+    decline: noop,
+    invalidate: noop,
+    on: noop,
+    off: noop,
+    send: noop
+  };
+}
+export function injectQuery(url, queryToInject) {
+  if (!url || (url[0] !== '.' && url[0] !== '/')) return url;
+  const pathname = url.replace(/[?#].*$/, '');
+  const { search, hash } = new URL(url, 'http://vite.dev');
+  return \`\${pathname}?\${queryToInject}\${search ? '&' + search.slice(1) : ''}\${hash || ''}\`;
+}
+export class ErrorOverlay {}
+`;
+      app.get('/@vite/client', (_req, res) => {
+        res.type('application/javascript').send(viteClientNoopShim);
+      });
+    }
+
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');

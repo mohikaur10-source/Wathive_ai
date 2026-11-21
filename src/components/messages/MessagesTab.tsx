@@ -13,12 +13,12 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AttendeeProfile } from '../../types';
-import { getTorontoNow } from '../../utils/timeZone';
 import { safeMediaUrl } from '../../utils/urlSafety';
 import {
   calculateCompatibility,
   computeBuddyArchetype,
-  DEFAULT_ALEX_QUIZ
+  DEFAULT_ALEX_QUIZ,
+  getConversationStarters
 } from '../../utils/compatibilityEngine';
 import { Goose } from '../common/Goose';
 import { ReportModal } from '../common/ReportModal';
@@ -44,6 +44,8 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
     respondConnectionRequest,
     withdrawConnectionRequest,
     chatMessages,
+    typingConversationIds,
+    chatErrors,
     sendMessage,
     removeConversations,
     blockUser,
@@ -72,6 +74,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
   const [blockTarget, setBlockTarget] = useState<{ id: string; name: string } | null>(null);
   const [toastMessage, setToastMessage] = useState('');
   const [isConfirming, setIsConfirming] = useState(false);
+  const [startersOpen, setStartersOpen] = useState(false);
   const [safetyDismissed, setSafetyDismissed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(SAFETY_NOTE_STORAGE_KEY) === '1';
@@ -82,6 +85,8 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
 
   const menuContainerRef = useRef<HTMLDivElement | null>(null);
   const chatHeaderMenuBtnRef = useRef<HTMLButtonElement | null>(null);
+  const messageInputRef = useRef<HTMLInputElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const lastTriggerRef = useRef<HTMLElement | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const prevConversationsRef = useRef(conversations);
@@ -195,27 +200,33 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
     ? chatMessages[selectedConversationId] || []
     : [];
 
-  const torontoTodayStr = getTorontoNow().dateStr;
+  const isPartnerTyping = Boolean(
+    selectedConversationId && typingConversationIds[selectedConversationId]
+  );
+  const currentChatError = selectedConversationId
+    ? chatErrors[selectedConversationId] || ''
+    : '';
+
+  useEffect(() => {
+    setStartersOpen(false);
+  }, [selectedConversationId]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [selectedConversationId, currentMessages.length, isPartnerTyping]);
 
   const linkedUpcomingEvent = selectedConversation
     ? upcomingEvents.find((e) => e.id === selectedConversation.eventId) || null
     : null;
 
-  const isEventEnded = Boolean(
-    selectedConversation &&
-      !linkedUpcomingEvent &&
-      (selectedConversation.eventDate < torontoTodayStr || !selectedConversation.eventDate)
-  );
+  const isEventEnded = Boolean(selectedConversation && !linkedUpcomingEvent);
 
   const viewingEvent = viewingEventId
     ? upcomingEvents.find((e) => e.id === viewingEventId) || null
     : null;
 
   const isBrandNewChat = Boolean(
-    selectedConversation &&
-      currentMessages.length <= 2 &&
-      !selectedConversation.isChatClosedPostEvent &&
-      !isEventEnded
+    selectedConversation && currentMessages.length <= 2
   );
 
   const hasCompletedQuiz = Boolean(user?.personalityQuiz?.completed && user?.personalityQuiz?.answers);
@@ -223,23 +234,20 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
     ? user?.personalityQuiz?.archetype || computeBuddyArchetype(user?.personalityQuiz?.answers)
     : null;
 
-  // Compute live Icebreaker Hook for the selected active chat so it always reflects the user's latest quiz
-  const selectedChatIcebreaker = selectedConversation
+  // Compute similarities & suggested conversation starters on demand for the active chat
+  const selectedChatStarters = selectedConversation
     ? (() => {
         const partnerProfile = allAttendees[selectedConversation.partner.id] || selectedConversation.partner;
-        const liveCompat = calculateCompatibility(
+        return getConversationStarters(
           user?.personalityQuiz || DEFAULT_ALEX_QUIZ,
           partnerProfile.personalityQuiz,
           user,
           partnerProfile,
           eventSocialBattery[selectedConversation.eventId] || selectedConversation.socialBattery,
           selectedConversation.eventId,
-          selectedConversation.eventTitle
+          selectedConversation.eventTitle,
+          isEventEnded
         );
-        return {
-          banner: selectedConversation.icebreakerBanner || liveCompat.icebreakerBanner,
-          question: selectedConversation.icebreakerQuestion || liveCompat.icebreakerQuestion
-        };
       })()
     : null;
 
@@ -319,12 +327,6 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
   const toggleExpandRequest = (id: string) => {
     setExpandedRequestIds((prev) => ({ ...prev, [id]: !prev[id] }));
   };
-
-  const closedComposerMessage = selectedConversation?.isChatClosedPostEvent
-    ? 'Chat closed.'
-    : isEventEnded
-    ? 'Event ended.'
-    : null;
 
   return (
     <div className="max-w-5xl mx-auto w-full h-[calc(100vh-9.5rem)] md:h-[calc(100vh-7.5rem)] flex flex-col relative">
@@ -535,7 +537,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
                           onClick={() => {
                             respondConnectionRequest(req.id, 'accept');
                             setActiveSubTab('conversations');
-                            showToast(`Connected with ${req.senderName}! Icebreaker pinned in chat.`);
+                            showToast(`Connected with ${req.senderName}!`);
                           }}
                           className="px-3.5 py-1.5 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-bold transition-colors shadow-soft cursor-pointer"
                         >
@@ -872,29 +874,6 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
                   </div>
                 </div>
 
-                {/* Pinned Icebreaker Hook Banner at the top of the chat */}
-                {selectedChatIcebreaker && (
-                  <div className="px-4 py-2.5 bg-accent-soft/85 border-b border-accent/35 shrink-0 space-y-1.5">
-                    <div className="flex items-start gap-2">
-                      <Sparkles className="w-3.5 h-3.5 text-accent-text shrink-0 mt-0.5" />
-                      <p className="text-xs text-ink font-medium leading-relaxed">
-                        {selectedChatIcebreaker.banner}
-                      </p>
-                    </div>
-                    {!closedComposerMessage && selectedChatIcebreaker.question && (
-                      <div className="flex items-center gap-2 pl-5">
-                        <button
-                          type="button"
-                          onClick={() => setInputText(selectedChatIcebreaker.question)}
-                          className="text-[11px] font-semibold text-accent-text hover:underline cursor-pointer text-left"
-                        >
-                          Ask: &ldquo;{selectedChatIcebreaker.question}&rdquo;
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
                 {/* One-time dismissible safety note on brand-new chat */}
                 {isBrandNewChat && !safetyDismissed && (
                   <div className="px-4 py-1.5 bg-canvas border-b border-line text-xs text-muted flex items-center justify-between gap-2 shrink-0">
@@ -946,35 +925,129 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({ initialSubTab }) => {
                       </div>
                     );
                   })}
+
+                  {isPartnerTyping && (
+                    <div className="flex flex-col items-start">
+                      <div
+                        className="rounded-2xl rounded-bl-sm bg-surface-soft px-3.5 py-2.5 inline-flex items-center gap-1"
+                        aria-label={`${selectedConversation.partner.name} is typing`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-muted animate-bounce [animation-delay:-0.24s]" />
+                        <span className="w-1.5 h-1.5 rounded-full bg-muted animate-bounce [animation-delay:-0.12s]" />
+                        <span className="w-1.5 h-1.5 rounded-full bg-muted animate-bounce" />
+                      </div>
+                    </div>
+                  )}
+
+                  <div ref={messagesEndRef} />
                 </div>
 
-                {/* Composer or single-line closed state */}
-                {closedComposerMessage ? (
-                  <div className="p-3.5 bg-surface-soft/40 border-t border-line text-xs text-muted text-center shrink-0">
-                    {closedComposerMessage}
-                  </div>
-                ) : (
-                  <form
-                    onSubmit={handleSendMessage}
-                    className="p-3 border-t border-line bg-surface flex items-center gap-2 shrink-0"
+                {currentChatError && (
+                  <div
+                    role="alert"
+                    className="px-4 py-2 border-t border-line bg-danger-soft/60 text-danger text-xs shrink-0"
                   >
-                    <input
-                      type="text"
-                      value={inputText}
-                      onChange={(e) => setInputText(e.target.value)}
-                      placeholder="Write a message..."
-                      className="flex-1 px-4 py-2.5 rounded-2xl border border-line bg-canvas text-ink placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent text-xs sm:text-sm"
-                    />
-                    <button
-                      type="submit"
-                      disabled={!inputText.trim()}
-                      className="px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-40 text-accent-ink rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-soft cursor-pointer"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">Send</span>
-                    </button>
-                  </form>
+                    {currentChatError}
+                  </div>
                 )}
+
+                {/* Conversation starters panel (only visible when toggled open) */}
+                {startersOpen && selectedChatStarters && (
+                  <div className="px-3.5 py-3 border-t border-line bg-canvas/85 shrink-0 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-muted">
+                        Conversation starters · In common
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setStartersOpen(false)}
+                        className="p-1 text-muted hover:text-ink rounded-lg transition-colors cursor-pointer"
+                        aria-label="Close conversation starters"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedChatStarters.similarities.map((item) => (
+                        <span
+                          key={item}
+                          className="text-[11px] px-2.5 py-0.5 rounded-lg bg-accent-soft/75 text-ink border border-accent/30 font-medium"
+                        >
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <span className="block text-[11px] font-semibold text-muted">
+                        Ideas to send
+                      </span>
+                      <div className="space-y-1.5">
+                        {selectedChatStarters.prompts.map((prompt) => (
+                          <button
+                            key={prompt}
+                            type="button"
+                            onClick={() => {
+                              setInputText(prompt);
+                              setStartersOpen(false);
+                              window.setTimeout(() => messageInputRef.current?.focus(), 0);
+                            }}
+                            className="w-full text-left text-xs text-ink bg-surface hover:bg-accent-soft/60 border border-line hover:border-accent/45 rounded-xl px-3 py-2 transition-colors cursor-pointer"
+                          >
+                            {prompt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Composer (always open even after event ends) */}
+                <form
+                  onSubmit={handleSendMessage}
+                  className="p-3 border-t border-line bg-surface flex items-center gap-2 shrink-0"
+                >
+                  <input
+                    ref={messageInputRef}
+                    type="text"
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    placeholder="Write a message..."
+                    className="flex-1 min-w-0 px-4 py-2.5 rounded-2xl border border-line bg-canvas text-ink placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent text-xs sm:text-sm"
+                  />
+                  {selectedChatStarters && (
+                    <div className="relative group shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setStartersOpen((prev) => !prev)}
+                        aria-expanded={startersOpen}
+                        aria-label="Conversation starters"
+                        className={`w-9 h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer ${
+                          startersOpen
+                            ? 'bg-accent-soft text-accent-text border-accent/45'
+                            : 'bg-canvas text-muted hover:text-ink border-line hover:bg-surface-soft'
+                        }`}
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-accent-text" />
+                      </button>
+                      <span
+                        role="tooltip"
+                        className="pointer-events-none opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity absolute bottom-full right-0 mb-1.5 whitespace-nowrap px-2 py-1 rounded-lg bg-ink text-canvas text-[11px] font-medium shadow-soft"
+                      >
+                        Conversation starters
+                      </span>
+                    </div>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={!inputText.trim()}
+                    className="px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-40 text-accent-ink rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-soft shrink-0 cursor-pointer"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Send</span>
+                  </button>
+                </form>
               </>
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center p-8 text-center gap-2">

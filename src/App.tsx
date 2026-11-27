@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AppProvider } from './context/AppContext';
+import { AppProvider, useApp } from './context/AppContext';
 import { Navigation, NavTab } from './components/Navigation';
 import { FeedTab } from './components/feed/FeedTab';
 import { CalendarNotificationsTab } from './components/calendar/CalendarNotificationsTab';
@@ -7,18 +7,30 @@ import { MessagesTab } from './components/messages/MessagesTab';
 import { ProfileTab } from './components/profile/ProfileTab';
 import { AuthModal } from './components/onboarding/AuthModal';
 import { LandingPage } from './components/landing/LandingPage';
+import { EventDetailModal } from './components/feed/EventDetailModal';
+import { DemoTools } from './components/common/DemoTools';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { useTheme } from './hooks/useTheme';
 
 const AppContent: React.FC = () => {
+  const { getEventById } = useApp();
   const { theme, toggleTheme } = useTheme();
   const [view, setView] = useState<'landing' | 'app'>('landing');
   const [landingEntryKey, setLandingEntryKey] = useState(0);
   const [activeTab, setActiveTab] = useState<NavTab>('feed');
   const [messagesSubTab, setMessagesSubTab] = useState<'conversations' | 'requests'>('conversations');
+  const [requestedConversationId, setRequestedConversationId] = useState<string | null>(null);
+  const [notificationEventId, setNotificationEventId] = useState<string | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
 
-  const navigateToMessages = (subTab: 'conversations' | 'requests' = 'conversations') => {
+  const navigateToMessages = (
+    subTab: 'conversations' | 'requests' = 'conversations',
+    conversationId?: string
+  ) => {
     setMessagesSubTab(subTab);
+    if (conversationId) {
+      setRequestedConversationId(conversationId);
+    }
     setActiveTab('messages');
   };
 
@@ -32,14 +44,19 @@ const AppContent: React.FC = () => {
     setView('landing');
   };
 
+  const notificationEvent = notificationEventId ? getEventById(notificationEventId) || null : null;
+
   if (view === 'landing') {
     return (
-      <LandingPage
-        key={landingEntryKey}
-        onEnterApp={handleEnterApp}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-      />
+      <>
+        <LandingPage
+          key={landingEntryKey}
+          onEnterApp={handleEnterApp}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+        />
+        <DemoTools />
+      </>
     );
   }
 
@@ -50,6 +67,10 @@ const AppContent: React.FC = () => {
         onSelectTab={(tab) => setActiveTab(tab)}
         onOpenAuth={() => setAuthModalOpen(true)}
         onOpenLanding={handleOpenLanding}
+        onOpenNotificationChat={(conversationId) =>
+          navigateToMessages('conversations', conversationId)
+        }
+        onOpenNotificationEvent={(eventId) => setNotificationEventId(eventId)}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -71,7 +92,21 @@ const AppContent: React.FC = () => {
           />
         )}
 
-        {activeTab === 'messages' && <MessagesTab initialSubTab={messagesSubTab} />}
+        {activeTab === 'messages' && (
+          <ErrorBoundary
+            resetKeys={[activeTab]}
+            onReset={() => setActiveTab('feed')}
+            title="Buddy Buzz ran into a problem"
+            message="Something unexpected happened while loading your chats. You can return to Explore and try again."
+            actionLabel="Back to Explore"
+          >
+            <MessagesTab
+              initialSubTab={messagesSubTab}
+              requestedConversationId={requestedConversationId}
+              onClearRequestedConversation={() => setRequestedConversationId(null)}
+            />
+          </ErrorBoundary>
+        )}
 
         {activeTab === 'profile' && (
           <ProfileTab onNavigateToMessages={navigateToMessages} />
@@ -82,6 +117,17 @@ const AppContent: React.FC = () => {
         isOpen={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
       />
+
+      {notificationEvent && (
+        <EventDetailModal
+          isOpen={Boolean(notificationEvent)}
+          event={notificationEvent}
+          onClose={() => setNotificationEventId(null)}
+          onNavigateToMessages={navigateToMessages}
+        />
+      )}
+
+      <DemoTools />
     </div>
   );
 };

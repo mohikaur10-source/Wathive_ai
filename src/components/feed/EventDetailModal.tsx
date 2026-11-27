@@ -11,67 +11,27 @@ import {
   ExternalLink,
   Check,
   ChevronDown,
-  MessageCircle,
-  Flag,
-  ShieldBan
+  Flag
 } from 'lucide-react';
-import { EventItem, AttendeeProfile } from '../../types';
+import { EventItem } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { downloadEventIcs } from '../../utils/calendar';
 import { formatModalEventDateTime } from '../../utils/timeZone';
 import { safeHttpUrl, safeMediaUrl } from '../../utils/urlSafety';
+import { formatSeekerCountText } from '../../utils/buddySeeding';
 import { Bee } from '../common/Bee';
 import { HexConfettiBurst } from '../common/HiveIcons';
-import { BuddyConnectModal } from './BuddyConnectModal';
-import { BuddyPrivacyPreviewModal } from './BuddyPrivacyPreviewModal';
-import { SocialBatteryModal } from './SocialBatteryModal';
 import { ReportModal } from '../common/ReportModal';
 import { UWVerificationModal } from '../common/UWVerificationModal';
-import { PersonalityQuizModal } from '../common/PersonalityQuizModal';
 import { AuthModal } from '../onboarding/AuthModal';
-import { SocialBatteryTag } from '../../types';
+import { getEventBuddyStatusText } from '../../utils/pairingLogic';
 
 interface EventDetailModalProps {
   event: EventItem | null;
   isOpen: boolean;
   onClose: () => void;
-  onNavigateToMessages?: (subTab?: 'conversations' | 'requests') => void;
+  onNavigateToMessages?: (subTab?: 'conversations' | 'requests', conversationId?: string) => void;
 }
-
-const SmallHexAvatar: React.FC<{ attendee: AttendeeProfile; index: number }> = ({
-  attendee,
-  index
-}) => {
-  const [failed, setFailed] = useState(false);
-  const initials = attendee.name
-    .split(' ')
-    .map((p) => p[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase();
-
-  return (
-    <div
-      className="w-7 h-7 hex-mask bg-surface p-[2px] shrink-0"
-      style={{ zIndex: 10 - index }}
-      title={attendee.name}
-    >
-      {!failed && attendee.avatar ? (
-        <img
-          src={attendee.avatar}
-          alt={attendee.name}
-          referrerPolicy="no-referrer"
-          onError={() => setFailed(true)}
-          className="w-full h-full object-cover hex-mask"
-        />
-      ) : (
-        <div className="w-full h-full hex-mask bg-surface-soft text-ink text-xs font-semibold flex items-center justify-center">
-          {initials || 'UW'}
-        </div>
-      )}
-    </div>
-  );
-};
 
 export const EventDetailModal: React.FC<EventDetailModalProps> = ({
   event,
@@ -87,76 +47,38 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     toggleGoing,
     attendeeVisibility,
     eventBuddySettings,
-    eventSocialBattery,
-    setEventSocialBattery,
     enableBuddyMatching,
     disableBuddyMatching,
     getEventAttendees,
-    getSuggestedMatches,
-    connectionRequests,
-    withdrawConnectionRequest,
-    respondConnectionRequest,
-    conversations,
-    blockUser
+    conversations
   } = useApp();
 
   const prefersReduced = Boolean(useReducedMotion());
   const modalRef = useRef<HTMLDivElement | null>(null);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
-  const noMatchBtnRef = useRef<HTMLButtonElement | null>(null);
-  const prevShowNoMatchRef = useRef(false);
 
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
-  const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
   const [descExpanded, setDescExpanded] = useState(false);
   const [moreDetailsOpen, setMoreDetailsOpen] = useState(false);
-  const [showAllMatches, setShowAllMatches] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
 
-  const [previewModalOpen, setPreviewModalOpen] = useState(false);
-  const [batteryModalOpen, setBatteryModalOpen] = useState(false);
-  const [selectedAttendeeForConnect, setSelectedAttendeeForConnect] =
-    useState<AttendeeProfile | null>(null);
-  const [connectModalOpen, setConnectModalOpen] = useState(false);
-  const [reportTarget, setReportTarget] = useState<{
-    type: 'user' | 'event';
-    attendee?: AttendeeProfile;
-  } | null>(null);
+  const [reportTarget, setReportTarget] = useState<{ type: 'event' } | null>(null);
   const [reportModalOpen, setReportModalOpen] = useState(false);
-  const [quizModalOpen, setQuizModalOpen] = useState(false);
   const [verificationModalOpen, setVerificationModalOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [pendingUpForBuddy, setPendingUpForBuddy] = useState(false);
-  const [blockConfirmAttendee, setBlockConfirmAttendee] = useState<AttendeeProfile | null>(null);
-  const [isBlocking, setIsBlocking] = useState(false);
-  const blockTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const rowMenuButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [toastMessage, setToastMessage] = useState('');
   const [rsvpConfettiActive, setRsvpConfettiActive] = useState(false);
   const [bookmarkBuzzKey, setBookmarkBuzzKey] = useState(0);
 
-  const anySubModalOpen =
-    previewModalOpen ||
-    batteryModalOpen ||
-    connectModalOpen ||
-    reportModalOpen ||
-    quizModalOpen ||
-    verificationModalOpen ||
-    authModalOpen ||
-    Boolean(blockConfirmAttendee);
-
-  const wasOpenRef = useRef(false);
+  const anySubModalOpen = reportModalOpen || verificationModalOpen || authModalOpen;
 
   // Reset transient UI states when switching events or closing
   useEffect(() => {
     setHeaderMenuOpen(false);
-    setOpenRowMenuId(null);
     setDescExpanded(false);
     setMoreDetailsOpen(false);
-    setShowAllMatches(false);
     setCoverFailed(false);
-    setBlockConfirmAttendee(null);
-    setIsBlocking(false);
     setAuthModalOpen(false);
     setPendingUpForBuddy(false);
   }, [event?.id, isOpen]);
@@ -179,53 +101,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     };
     enableBuddyMatching(event.id, settings);
     setPendingUpForBuddy(false);
-    window.setTimeout(() => noMatchBtnRef.current?.focus(), 0);
   }, [isOpen, event, pendingUpForBuddy, authModalOpen, user, eventBuddySettings, enableBuddyMatching]);
-
-  // Focus button only when the no-match card dynamically appears while the modal is already open
-  const isNoMatchCardVisible = Boolean(
-    isOpen &&
-      event &&
-      event.status !== 'cancelled' &&
-      event.status !== 'ended' &&
-      !event.isResearchStudy &&
-      getSuggestedMatches(event.id).filter((m) => m.attendee.id !== user?.id).length === 0
-  );
-
-  useEffect(() => {
-    if (!isOpen) {
-      wasOpenRef.current = false;
-      prevShowNoMatchRef.current = false;
-      return;
-    }
-    if (!wasOpenRef.current) {
-      wasOpenRef.current = true;
-      prevShowNoMatchRef.current = isNoMatchCardVisible;
-      return;
-    }
-    if (!prevShowNoMatchRef.current && isNoMatchCardVisible) {
-      const t = window.setTimeout(() => {
-        noMatchBtnRef.current?.focus();
-      }, 20);
-      prevShowNoMatchRef.current = true;
-      return () => window.clearTimeout(t);
-    }
-    prevShowNoMatchRef.current = isNoMatchCardVisible;
-  }, [isNoMatchCardVisible, isOpen]);
-
-  useEffect(() => {
-    if (!blockConfirmAttendee) return;
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setBlockConfirmAttendee(null);
-        setIsBlocking(false);
-        window.setTimeout(() => blockTriggerRef.current?.focus(), 0);
-      }
-    };
-    document.addEventListener('keydown', handleEsc);
-    return () => document.removeEventListener('keydown', handleEsc);
-  }, [blockConfirmAttendee]);
 
   // Lock background scroll & restore focus
   useEffect(() => {
@@ -253,9 +129,8 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
       if (anySubModalOpen) return;
 
       if (e.key === 'Escape') {
-        if (headerMenuOpen || openRowMenuId) {
+        if (headerMenuOpen) {
           setHeaderMenuOpen(false);
-          setOpenRowMenuId(null);
           return;
         }
         onClose();
@@ -287,22 +162,19 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, anySubModalOpen, headerMenuOpen, openRowMenuId, onClose]);
+  }, [isOpen, anySubModalOpen, headerMenuOpen, onClose]);
 
-  // Close menus on outside click
+  // Close menu on outside click
   useEffect(() => {
-    if (!headerMenuOpen && !openRowMenuId) return;
+    if (!headerMenuOpen) return;
     const handlePointerDown = (e: MouseEvent) => {
       if (headerMenuRef.current && !headerMenuRef.current.contains(e.target as Node)) {
         setHeaderMenuOpen(false);
       }
-      if (!(e.target as HTMLElement)?.closest('[data-row-menu]')) {
-        setOpenRowMenuId(null);
-      }
     };
     document.addEventListener('mousedown', handlePointerDown);
     return () => document.removeEventListener('mousedown', handlePointerDown);
-  }, [headerMenuOpen, openRowMenuId]);
+  }, [headerMenuOpen]);
 
   if (!isOpen || !event) return null;
 
@@ -312,16 +184,14 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
   const isEnded = event.status === 'ended';
   const isClosedEvent = isCancelled || isEnded;
   const isBuddyMatchingActive = attendeeVisibility[event.id] ?? false;
+  const conversationsForEvent = conversations.filter((c) => c.eventId === event.id);
+  const activeConversation = conversationsForEvent[0] || null;
+  const eventBuddyStatus = getEventBuddyStatusText({
+    isBuddyMatchingActive: isBuddyMatchingActive || Boolean(activeConversation),
+    conversationsForEvent
+  });
 
   const attendees = getEventAttendees(event.id);
-  const suggestedMatches = getSuggestedMatches(event.id).filter(
-    (m) => m.attendee.id !== user?.id
-  );
-  const visibleMatches = showAllMatches
-    ? suggestedMatches
-    : suggestedMatches.slice(0, 3);
-
-  const hasQuizCompleted = Boolean(user?.personalityQuiz?.completed);
 
   const priceLabel = event.isFree ? 'Free' : event.price;
 
@@ -377,35 +247,6 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     toggleSaveEvent(event.id);
   };
 
-  const currentEventBattery = eventSocialBattery[event.id];
-
-  const handleFindBuddyClick = () => {
-    if (!user) {
-      setAuthModalOpen(true);
-      return;
-    }
-    if (!user.isVerifiedUWStudent) {
-      setVerificationModalOpen(true);
-      return;
-    }
-    if (!isGoing) {
-      toggleGoing(event.id);
-    }
-    setBatteryModalOpen(true);
-  };
-
-  const handleSelectSocialBattery = (battery: SocialBatteryTag) => {
-    setEventSocialBattery(event.id, battery);
-    setBatteryModalOpen(false);
-    const settings = eventBuddySettings[event.id] || {
-      showFaculty: true,
-      showYear: true,
-      shortIntro: user?.bio || ''
-    };
-    enableBuddyMatching(event.id, settings);
-    showToast(`Event energy set: ${battery}`);
-  };
-
   const handleUpForBuddyClick = () => {
     if (!user) {
       setPendingUpForBuddy(true);
@@ -417,26 +258,13 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
       setVerificationModalOpen(true);
       return;
     }
-    setBatteryModalOpen(true);
+    const settings = eventBuddySettings[event.id] || {
+      showFaculty: true,
+      showYear: true,
+      shortIntro: user.bio || ''
+    };
+    enableBuddyMatching(event.id, settings);
   };
-
-  const handleUndoUpForBuddy = () => {
-    disableBuddyMatching(event.id);
-    window.setTimeout(() => noMatchBtnRef.current?.focus(), 0);
-  };
-
-  const existingRequestFor = (attendeeId: string) =>
-    connectionRequests.find(
-      (r) =>
-        r.eventId === event.id &&
-        r.senderId === user?.id &&
-        r.recipientId === attendeeId
-    );
-
-  const existingConversationWith = (attendeeId: string) =>
-    conversations.find(
-      (c) => c.eventId === event.id && c.partner.id === attendeeId
-    );
 
   return (
     <>
@@ -637,7 +465,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                     <button
                       type="button"
                       onClick={handleGoingClick}
-                      className="relative flex-1 sm:flex-initial sm:min-w-[140px] h-11 px-5 rounded-2xl bg-accent hover:bg-accent-hover text-accent-ink text-sm font-semibold flex items-center justify-center gap-2 shadow-soft transition-colors cursor-pointer"
+                      className="relative flex-1 sm:flex-initial sm:min-w-[140px] h-11 px-5 rounded-full bg-accent hover:bg-accent-hover text-accent-ink text-sm font-semibold flex items-center justify-center gap-2 shadow-soft transition-colors cursor-pointer"
                     >
                       <HexConfettiBurst active={rsvpConfettiActive} />
                       {isGoing && <Check className="w-4 h-4 stroke-[2.6]" />}
@@ -758,338 +586,93 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                   </div>
                 )}
 
-                {/* 8. Buddy Section (hidden for ended or cancelled events) */}
+                {/* 8. One Calm Buddy Section (hidden for ended or cancelled events) */}
                 {!isClosedEvent && (
-                  <div className="bg-accent-soft/70 rounded-2xl p-5 space-y-4">
+                  <div className="bg-surface-soft/70 border border-line rounded-2xl p-4 sm:p-5">
                     {event.isResearchStudy ? (
                       <p className="text-sm text-muted">
                         Buddy matching is off for research studies.
                       </p>
-                    ) : (
-                      <>
-                        {/* Buddy Card Header */}
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            {attendees.length > 0 && (
-                              <div className="flex items-center -space-x-2 shrink-0">
-                                {attendees.slice(0, 3).map((att, idx) => (
-                                  <SmallHexAvatar key={att.id} attendee={att} index={idx} />
-                                ))}
-                              </div>
-                            )}
-                            <span className="text-sm font-semibold text-ink tabular-nums">
-                              {attendees.length} looking for a buddy
-                            </span>
-                          </div>
-
-                          {visibleMatches.length > 0 &&
-                            (isBuddyMatchingActive ? (
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setPreviewModalOpen(true)}
-                                  className="px-3 py-1.5 rounded-xl bg-surface text-ink text-xs font-semibold hover:bg-surface-soft transition-colors cursor-pointer"
-                                >
-                                  Edit visibility
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    disableBuddyMatching(event.id);
-                                    showToast('Buddy matching turned off.');
-                                  }}
-                                  className="px-3 py-1.5 rounded-xl text-danger text-xs font-semibold hover:bg-danger-soft transition-colors cursor-pointer"
-                                >
-                                  Turn off
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={handleFindBuddyClick}
-                                className="px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs font-semibold shadow-soft transition-colors cursor-pointer"
-                              >
-                                Find a buddy
-                              </button>
-                            ))}
-                        </div>
-
-                        {/* Active Event Social Battery pill when set */}
-                        {currentEventBattery && (
-                          <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-surface/80 border border-line text-xs">
-                            <span className="text-muted">
-                              Your energy:{' '}
-                              <strong className="font-semibold text-ink">{currentEventBattery}</strong>
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => setBatteryModalOpen(true)}
-                              className="font-semibold text-accent-text hover:underline cursor-pointer shrink-0"
-                            >
-                              Change
-                            </button>
-                          </div>
-                        )}
-
-                        {/* One-line quiz link ONLY when matches exist and user has no quiz result */}
-                        {visibleMatches.length > 0 && !hasQuizCompleted && (
-                          <p className="text-xs text-muted">
-                            <button
-                              type="button"
-                              onClick={() => setQuizModalOpen(true)}
-                              className="font-semibold text-accent-text hover:underline cursor-pointer"
-                            >
-                              Take the 30-second quiz for better matches.
-                            </button>
+                    ) : activeConversation ? (
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="space-y-1">
+                          <p className="text-sm font-medium text-ink">
+                            {eventBuddyStatus.statusText}
                           </p>
-                        )}
-
-                        {/* Match Rows or Calm No-Match State */}
-                        {visibleMatches.length === 0 ? (
-                          <div className="bg-surface rounded-2xl border border-line p-4 space-y-3">
-                            <p className="text-sm font-medium text-ink">No matches yet.</p>
-
-                            {isBuddyMatchingActive ? (
-                              <div className="space-y-2">
-                                <div className="flex flex-wrap items-center gap-3">
-                                  <button
-                                    ref={noMatchBtnRef}
-                                    type="button"
-                                    aria-pressed="true"
-                                    className="px-4 py-2.5 min-h-[44px] rounded-xl bg-accent text-accent-ink text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 shadow-soft cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
-                                  >
-                                    <Check className="w-4 h-4 stroke-[2.5]" />
-                                    <span>You&apos;re in</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={handleUndoUpForBuddy}
-                                    className="text-xs font-medium text-muted hover:text-ink hover:underline underline-offset-2 px-1.5 py-2 min-h-[44px] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-surface rounded-lg"
-                                  >
-                                    Undo
-                                  </button>
-                                </div>
-                                <p className="text-xs text-muted">
-                                  We&apos;ll let you know when someone joins.
-                                </p>
-                              </div>
-                            ) : (
-                              <div>
-                                <button
-                                  ref={noMatchBtnRef}
-                                  type="button"
-                                  onClick={handleUpForBuddyClick}
-                                  className="px-4 py-2.5 min-h-[44px] rounded-xl bg-accent hover:bg-accent-hover text-accent-ink text-xs sm:text-sm font-semibold inline-flex items-center justify-center shadow-soft transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
-                                >
-                                  I&apos;m up for a buddy
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="divide-y divide-line">
-                            {visibleMatches.map(({ attendee, compatibility }) => {
-                              const existingReq = existingRequestFor(attendee.id);
-                              const existingConv = existingConversationWith(attendee.id);
-                              const incomingReq = connectionRequests.find(
-                                (r) =>
-                                  r.eventId === event.id &&
-                                  r.senderId === attendee.id &&
-                                  r.recipientId === user?.id &&
-                                  r.status === 'pending'
-                              );
-                              const rowMenuOpen = openRowMenuId === attendee.id;
-
-                              return (
-                                <div key={attendee.id} className="py-3 first:pt-1 last:pb-1 space-y-2">
-                                  <div className="flex items-center justify-between gap-3">
-                                    <div className="flex items-center gap-2.5 min-w-0">
-                                      <img
-                                        src={attendee.avatar}
-                                        alt={attendee.name}
-                                        referrerPolicy="no-referrer"
-                                        className="w-9 h-9 rounded-full object-cover shrink-0"
-                                      />
-                                      <div className="min-w-0">
-                                        <div className="flex items-center gap-2 min-w-0 flex-wrap">
-                                          <span className="text-sm font-semibold text-ink truncate">
-                                            {attendee.name}
-                                          </span>
-                                          <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-surface text-ink text-xs font-semibold tabular-nums">
-                                            {compatibility.score}% match
-                                          </span>
-                                        </div>
-                                        {compatibility.icebreakerPill && (
-                                          <p className="text-[11px] text-muted truncate mt-0.5">
-                                            {compatibility.icebreakerPill}
-                                          </p>
-                                        )}
-                                      </div>
-                                    </div>
-
-                                    <div className="flex items-center gap-1.5 shrink-0">
-                                      {existingConv ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            onClose();
-                                            onNavigateToMessages?.('conversations');
-                                          }}
-                                          className="px-3 py-1.5 rounded-xl bg-surface hover:bg-surface-soft text-ink text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
-                                        >
-                                          <MessageCircle className="w-3.5 h-3.5 text-accent-text" />
-                                          <span>Chat</span>
-                                        </button>
-                                      ) : existingReq && existingReq.status === 'pending' ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => withdrawConnectionRequest(existingReq.id)}
-                                          className="px-3 py-1.5 rounded-xl bg-surface text-muted hover:text-danger text-xs font-semibold transition-colors cursor-pointer"
-                                          title="Withdraw pending request"
-                                        >
-                                          Sent · Withdraw
-                                        </button>
-                                      ) : existingReq && existingReq.status === 'declined' ? (
-                                        <span className="text-xs text-muted px-2">Declined</span>
-                                      ) : incomingReq ? (
-                                        <div className="flex items-center gap-1.5">
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              respondConnectionRequest(incomingReq.id, 'accept');
-                                              showToast(`Connected with ${attendee.name}.`);
-                                            }}
-                                            className="px-3 py-1.5 rounded-xl bg-surface hover:bg-surface-soft text-ink text-xs font-semibold cursor-pointer"
-                                          >
-                                            Accept
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              respondConnectionRequest(incomingReq.id, 'decline');
-                                              showToast('Request declined.');
-                                            }}
-                                            className="px-2.5 py-1.5 rounded-xl text-muted hover:text-ink text-xs font-semibold cursor-pointer"
-                                          >
-                                            Decline
-                                          </button>
-                                        </div>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            if (!user?.isVerifiedUWStudent) {
-                                              setVerificationModalOpen(true);
-                                              return;
-                                            }
-                                            setSelectedAttendeeForConnect(attendee);
-                                            setConnectModalOpen(true);
-                                          }}
-                                          className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
-                                            isBuddyMatchingActive
-                                              ? 'bg-accent hover:bg-accent-hover text-accent-ink shadow-soft'
-                                              : 'bg-surface hover:bg-surface-soft text-ink'
-                                          }`}
-                                        >
-                                          Say hi
-                                        </button>
-                                      )}
-
-                                      <div className="relative" data-row-menu>
-                                        <button
-                                          ref={(el) => {
-                                            rowMenuButtonRefs.current[attendee.id] = el;
-                                          }}
-                                          type="button"
-                                          onClick={() =>
-                                            setOpenRowMenuId((prev) =>
-                                              prev === attendee.id ? null : attendee.id
-                                            )
-                                          }
-                                          aria-label={`More actions for ${attendee.name}`}
-                                          aria-expanded={rowMenuOpen}
-                                          aria-haspopup="menu"
-                                          className="w-8 h-8 rounded-xl text-muted hover:text-ink hover:bg-surface flex items-center justify-center transition-colors cursor-pointer"
-                                        >
-                                          <MoreHorizontal className="w-4 h-4" />
-                                        </button>
-
-                                        {rowMenuOpen && (
-                                          <div
-                                            role="menu"
-                                            className="absolute right-0 mt-1 w-36 bg-surface rounded-2xl border border-line shadow-lift py-1 z-30"
-                                          >
-                                            <button
-                                              type="button"
-                                              role="menuitem"
-                                              onClick={() => {
-                                                blockTriggerRef.current =
-                                                  rowMenuButtonRefs.current[attendee.id] ?? null;
-                                                setOpenRowMenuId(null);
-                                                setBlockConfirmAttendee(attendee);
-                                              }}
-                                              className="w-full px-3 py-2 text-left text-xs font-medium text-ink hover:bg-surface-soft flex items-center gap-2 cursor-pointer"
-                                            >
-                                              <ShieldBan className="w-3.5 h-3.5 text-muted" />
-                                              <span>Block</span>
-                                            </button>
-                                            <button
-                                              type="button"
-                                              role="menuitem"
-                                              onClick={() => {
-                                                setOpenRowMenuId(null);
-                                                setReportTarget({ type: 'user', attendee });
-                                                setReportModalOpen(true);
-                                              }}
-                                              className="w-full px-3 py-2 text-left text-xs font-medium text-danger hover:bg-danger-soft flex items-center gap-2 cursor-pointer"
-                                            >
-                                              <Flag className="w-3.5 h-3.5" />
-                                              <span>Report</span>
-                                            </button>
-                                          </div>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-
-                        {/* Expand all + Preview link (matches-found state only) */}
-                        {visibleMatches.length > 0 && (
-                          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs">
-                            {suggestedMatches.length > 3 ? (
-                              <button
-                                type="button"
-                                onClick={() => setShowAllMatches((prev) => !prev)}
-                                className="font-semibold text-accent-text hover:underline cursor-pointer"
-                              >
-                                {showAllMatches
-                                  ? 'Show fewer'
-                                  : `See all (${suggestedMatches.length})`}
-                              </button>
-                            ) : (
-                              <span />
-                            )}
-
+                          <button
+                            type="button"
+                            onClick={() => {
+                              disableBuddyMatching(event.id);
+                              showToast('Buddy matching turned off.');
+                            }}
+                            className="text-xs font-medium text-muted hover:text-ink underline underline-offset-2 cursor-pointer"
+                          >
+                            Turn off
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onClose();
+                            onNavigateToMessages?.('conversations', activeConversation.id);
+                          }}
+                          className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-ink text-xs font-semibold shadow-soft transition-colors cursor-pointer shrink-0"
+                        >
+                          Open chat
+                        </button>
+                      </div>
+                    ) : !user || !isBuddyMatchingActive ? (
+                      <div className="space-y-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <p className="text-sm font-medium text-ink tabular-nums">
+                            {attendees.length > 0
+                              ? formatSeekerCountText(attendees.length)
+                              : 'Looking for a buddy?'}
+                          </p>
+                          <div className="flex flex-wrap items-center gap-3 shrink-0">
                             <button
                               type="button"
                               onClick={() => {
-                                if (!user?.isVerifiedUWStudent) {
-                                  setVerificationModalOpen(true);
-                                  return;
+                                if (!isGoing) {
+                                  toggleGoing(event.id);
+                                  showToast('RSVP active. Attending on your own.');
+                                } else {
+                                  showToast('Attending on your own.');
                                 }
-                                setPreviewModalOpen(true);
                               }}
-                              className="font-semibold text-muted hover:text-ink hover:underline cursor-pointer"
+                              className="text-xs font-medium text-muted hover:text-ink underline underline-offset-2 cursor-pointer"
                             >
-                              Preview what others see
+                              I&apos;ll attend on my own
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleUpForBuddyClick}
+                              className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-ink text-xs font-semibold shadow-soft transition-colors cursor-pointer shrink-0"
+                            >
+                              I&apos;m up for a buddy
                             </button>
                           </div>
-                        )}
-                      </>
+                        </div>
+                        <p className="text-xs text-muted">
+                          Buddy matching is subject to availability. A match is not guaranteed.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-ink">
+                          Finding your buddy...
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            disableBuddyMatching(event.id);
+                            showToast('Removed from buddy matching.');
+                          }}
+                          className="text-xs font-medium text-muted hover:text-ink underline underline-offset-2 cursor-pointer shrink-0"
+                        >
+                          I don&apos;t need a buddy anymore
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}
@@ -1100,97 +683,19 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
       </AnimatePresence>
 
       {/* Nested Modals */}
-      <BuddyPrivacyPreviewModal
-        isOpen={previewModalOpen}
-        event={event}
-        onClose={() => setPreviewModalOpen(false)}
-        onOptInSuccess={() => showToast('Buddy matching enabled.')}
-      />
-
-      {selectedAttendeeForConnect && (
-        <BuddyConnectModal
-          isOpen={connectModalOpen}
-          event={event}
-          attendee={selectedAttendeeForConnect}
-          onClose={() => {
-            setConnectModalOpen(false);
-            setSelectedAttendeeForConnect(null);
-          }}
-          onSuccess={() => showToast(`Said hi to ${selectedAttendeeForConnect.name}.`)}
-        />
-      )}
-
       {reportTarget && (
         <ReportModal
           isOpen={reportModalOpen}
           targetType={reportTarget.type}
-          attendee={reportTarget.attendee}
           event={event}
           onClose={() => {
             setReportModalOpen(false);
             setReportTarget(null);
           }}
-          onSuccess={(action) => {
-            showToast(
-              reportTarget.type === 'user'
-                ? action === 'block'
-                  ? 'Blocked.'
-                  : 'Reported. Chat removed.'
-                : 'Event reported.'
-            );
+          onSuccess={() => {
+            showToast('Event reported.');
           }}
         />
-      )}
-
-      {blockConfirmAttendee && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-xs"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="event-block-dialog-title"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) {
-              setBlockConfirmAttendee(null);
-              window.setTimeout(() => blockTriggerRef.current?.focus(), 0);
-            }
-          }}
-        >
-          <div className="bg-surface text-ink rounded-3xl max-w-sm w-full p-6 shadow-lift border border-line space-y-4">
-            <h3 id="event-block-dialog-title" className="font-display font-bold text-ink text-lg">
-              Block {blockConfirmAttendee.name.trim().split(/\s+/)[0] || blockConfirmAttendee.name}?
-            </h3>
-            <p className="text-xs text-muted">
-              Their chats will be removed.
-            </p>
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setBlockConfirmAttendee(null);
-                  window.setTimeout(() => blockTriggerRef.current?.focus(), 0);
-                }}
-                className="px-4 py-2 text-xs font-semibold text-muted hover:text-ink rounded-xl cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isBlocking}
-                onClick={() => {
-                  if (isBlocking) return;
-                  setIsBlocking(true);
-                  blockUser(blockConfirmAttendee.id);
-                  setBlockConfirmAttendee(null);
-                  setIsBlocking(false);
-                  showToast('Blocked.');
-                }}
-                className="px-4 py-2 bg-danger text-white font-bold rounded-xl text-xs shadow-soft cursor-pointer hover:opacity-90 disabled:opacity-50"
-              >
-                Block
-              </button>
-            </div>
-          </div>
-        </div>
       )}
 
       <UWVerificationModal
@@ -1208,7 +713,6 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
             };
             enableBuddyMatching(event.id, settings);
             setPendingUpForBuddy(false);
-            window.setTimeout(() => noMatchBtnRef.current?.focus(), 0);
           } else {
             showToast('UW status verified.');
           }
@@ -1218,24 +722,6 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
       <AuthModal
         isOpen={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
-      />
-
-      <SocialBatteryModal
-        isOpen={batteryModalOpen}
-        eventTitle={event.title}
-        currentBattery={currentEventBattery}
-        onSelect={handleSelectSocialBattery}
-        onClose={() => setBatteryModalOpen(false)}
-      />
-
-      <PersonalityQuizModal
-        isOpen={quizModalOpen}
-        onClose={() => setQuizModalOpen(false)}
-        onSuccess={() => showToast('Matches updated!')}
-        onNavigateToBuddyHub={() => {
-          onClose();
-          onNavigateToMessages?.('requests');
-        }}
       />
     </>
   );

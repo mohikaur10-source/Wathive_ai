@@ -154,20 +154,62 @@ export type NotificationItemType =
   | 'schedule_change'
   | 'student_discount';
 
+export type BuddyNotificationKind =
+  | 'provisional_match'
+  | 'mutual_confirmation'
+  | 'pairing_ended'
+  | 'buddy_cancelled'
+  | 'replacement_found'
+  | 'no_match_found';
+
+export type NotificationActionKind = 'open_chat' | 'view_status';
+
 export interface InAppNotification {
   id: string;
   type: NotificationItemType;
+  kind?: BuddyNotificationKind;
+  dedupeKey?: string;
   title: string;
   message: string;
   timestamp: string;
+  createdAtMs?: number;
   read: boolean;
   eventId?: string;
   eventTitle?: string;
+  conversationId?: string;
+  partnerId?: string;
   category?: NotificationInterestCategory;
   actionUrl?: string;
   actionLabel?: string;
+  actionKind?: NotificationActionKind;
   discountDeal?: string;
   urgent?: boolean;
+}
+
+export interface PushDailyCounter {
+  dateStr: string;
+  count: number;
+}
+
+export interface BuddyOptInRecord {
+  optedInAtMs: number;
+  optedInBeforeStart: boolean;
+  active: boolean;
+}
+
+export type BuddyAttendanceAnswer = 'yes' | 'independent' | 'did_not_attend';
+export type BuddyLikertAnswer = 'yes' | 'somewhat' | 'no' | 'not_applicable';
+export type BuddyUseAgainAnswer = 'definitely' | 'maybe' | 'probably_not';
+
+export interface BuddySurveySubmission {
+  eventId: string;
+  submittedAt: string;
+  hadBuddyPairing: boolean;
+  attendedWithBuddy: BuddyAttendanceAnswer;
+  comfortableWithBuddy?: BuddyLikertAnswer;
+  matchedAppropriately?: BuddyLikertAnswer;
+  useMatchingAgain: BuddyUseAgainAnswer;
+  feedbackText?: string;
 }
 
 export interface UserProfile {
@@ -308,6 +350,43 @@ export interface RemovedChatRecord {
   removedAt: string;
 }
 
+export type PairingStatus = 'provisional' | 'confirmed';
+
+export type BuddyPairingLifecycleState = 'searching' | 'provisional' | 'confirmed' | 'ended';
+
+export type BuddyManageAction =
+  | 'confirm_buddy'
+  | 'find_another'
+  | 'no_longer_need'
+  | 'unable_to_attend'
+  | 'block_or_report';
+
+export interface ArchivedChatMessage {
+  id: string;
+  senderRole: 'me' | 'buddy' | 'system';
+  text: string;
+  timestamp: string;
+}
+
+export interface ArchivedConversationRecord {
+  id: string;
+  eventId: string;
+  eventTitle: string;
+  eventDate: string;
+  eventLocation: string;
+  closedAtMs: number;
+  messages: ArchivedChatMessage[];
+}
+
+export interface PartnerSimulationNotice {
+  id: string;
+  kind: 'pairing_ended' | 'buddy_cancelled';
+  eventId: string;
+  eventTitle: string;
+  replacementSearchStarted: boolean;
+  createdAtMs: number;
+}
+
 export interface Conversation {
   id: string;
   eventId: string;
@@ -318,6 +397,10 @@ export interface Conversation {
   lastMessage: string;
   lastMessageTime: string;
   unreadCount: number;
+  pairingStatus?: PairingStatus;
+  userConfirmed?: boolean;
+  partnerConfirmed?: boolean;
+  confirmedAt?: string;
   isReported?: boolean;
   stayConnectedUser?: boolean; // User choice post-event
   stayConnectedPartner?: boolean; // Partner choice post-event

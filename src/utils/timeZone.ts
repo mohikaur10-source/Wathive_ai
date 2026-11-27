@@ -282,15 +282,26 @@ export function formatModalEventDateTime(
   startTime: string,
   endTime?: string
 ): string {
+  const safeDate = typeof dateStr === 'string' ? dateStr.trim() : '';
+  const safeStart = typeof startTime === 'string' ? startTime.trim() : '';
+  const safeEnd = typeof endTime === 'string' ? endTime.trim() : undefined;
   try {
-    const [year, month, day] = dateStr.split('-').map(Number);
+    const [year, month, day] = safeDate.split('-').map(Number);
+    if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+      return [safeDate, safeStart].filter(Boolean).join(' · ');
+    }
     const d = new Date(Date.UTC(year, month - 1, day));
+    if (Number.isNaN(d.getTime())) {
+      return [safeDate, safeStart].filter(Boolean).join(' · ');
+    }
     const datePart = d.toLocaleDateString('en-US', {
       timeZone: 'UTC',
       weekday: 'short',
       month: 'short',
       day: 'numeric'
     });
+
+    if (!safeStart) return datePart;
 
     const format12h = (hhmm: string) => {
       const [h, m] = hhmm.split(':').map(Number);
@@ -301,11 +312,11 @@ export function formatModalEventDateTime(
       return { text: `${displayH}:${displayM}`, period };
     };
 
-    const start = format12h(startTime);
+    const start = format12h(safeStart);
     let timeRange = `${start.text} ${start.period}`.trim();
 
-    if (endTime && endTime !== startTime) {
-      const end = format12h(endTime);
+    if (safeEnd && safeEnd !== safeStart) {
+      const end = format12h(safeEnd);
       if (start.period && start.period === end.period) {
         timeRange = `${start.text}–${end.text} ${end.period}`;
       } else {
@@ -317,7 +328,7 @@ export function formatModalEventDateTime(
     const tzSuffix = showTz ? ` ${getWaterlooTzAbbreviation(new Date(year, month - 1, day))}` : '';
     return `${datePart} · ${timeRange}${tzSuffix}`;
   } catch {
-    return `${dateStr} · ${startTime}`;
+    return [safeDate, safeStart].filter(Boolean).join(' · ');
   }
 }
 

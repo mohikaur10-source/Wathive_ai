@@ -22,7 +22,13 @@ import {
   RemovedChatReason,
   RemovedChatRecord,
   SocialBatteryTag,
-  EventFilterTag
+  EventFilterTag,
+  BuddyNotificationKind,
+  BuddyOptInRecord,
+  BuddySurveySubmission,
+  PushDailyCounter,
+  ArchivedConversationRecord,
+  PartnerSimulationNotice
 } from '../types';
 import {
   INITIAL_USER,
@@ -53,7 +59,7 @@ import {
 import { getFilterTagKey } from '../utils/eventFilters';
 import { runTwoHourRefreshCycle, detectDuplicateEvents } from '../utils/eventAggregationEngine';
 import { toWaterlooUtcIso, getTorontoNow, TorontoNowInfo } from '../utils/timeZone';
-import { isEventPast } from '../utils/eventLifecycle';
+import { getEventEndUtcMs, getEventStartUtcMs, isEventPast } from '../utils/eventLifecycle';
 import {
   ChatStateSnapshot,
   RemoveConversationsParams,
@@ -64,6 +70,36 @@ import {
   isPartnerBlockedOrReported,
   sanitizeChatSnapshot
 } from '../utils/chatRemoval';
+import { BUDDY_POLICY } from '../config/buddyPolicy';
+import {
+  buildNotificationDedupeKey,
+  canCreateBuddyNotification,
+  canSendBrowserPush,
+  createBuddyNotificationItem,
+  getBrowserNotificationPermission,
+  incrementPushDailyCounter,
+  isNotificationVisibleForSettings,
+  requestBrowserNotificationPermission,
+  showBrowserNotification
+} from '../utils/buddyNotifications';
+import {
+  findReplacementCandidate,
+  getMatchConversationId
+} from '../utils/pairingLogic';
+import {
+  getEffectiveNowMs,
+  readDemoClockMs,
+  writeDemoClockMs
+} from '../utils/demoClock';
+import {
+  getFirstName,
+  getSeedBuddySeekers
+} from '../utils/buddySeeding';
+import {
+  createArchivedConversationRecord,
+  getManageBuddyOutcomePlan,
+  purgeExpiredArchivedConversations
+} from '../utils/pairingLifecycle';
 
 export interface BuddyPrivacySettings {
   showFaculty: boolean;
@@ -163,16 +199,50 @@ interface AppContextType {
   moderateEvent: (eventId: string, newStatus: 'approved' | 'rejected' | 'flagged') => void;
   resolveReport: (reportId: string, action: 'resolved_warning' | 'resolved_removed' | 'dismissed', notes?: string) => void;
   addCustomDiscount: (discount: Omit<StudentDiscount, 'id' | 'verifiedAt'>) => void;
+
+  // Buddy notifications, pairing confirmation, post-event surveys & demo controls
+  effectiveNowMs: number;
+  demoClockMs: number | null;
+  attendedEventSnapshots: Record<string, EventItem>;
+  buddyOptInHistory: Record<string, BuddyOptInRecord>;
+  pairingEventHistory: Record<string, boolean>;
+  endedPairingsByEvent: Record<string, string[]>;
+  searchingReplacementEventIds: Record<string, boolean>;
+  eventSurveys: Record<string, BuddySurveySubmission>;
+  surveyDismissedEventIds: string[];
+  browserAlertsEnabled: boolean;
+  browserAlertPermission: NotificationPermission | 'unsupported';
+  visibleNotifications: InAppNotification[];
+  getEventById: (eventId: string) => EventItem | undefined;
+  markConversationRead: (conversationId: string) => void;
+  confirmPairing: (conversationId: string) => void;
+  rematchBuddyForEvent: (conversationId: string) => { ok: boolean; message: string };
+  leaveBuddyMatchingFromChat: (conversationId: string) => { ok: boolean; message: string };
+  cancelRsvpFromChat: (conversationId: string) => { ok: boolean; message: string };
+  archivedConversations: ArchivedConversationRecord[];
+  partnerSimulationLog: PartnerSimulationNotice[];
+  toggleBrowserAlerts: (enabled: boolean) => Promise<{ permission: NotificationPermission | 'unsupported' }>;
+  submitPostEventSurvey: (submission: BuddySurveySubmission) => void;
+  dismissSurveyOffer: (eventId: string) => void;
+  demoGetMatched: () => { ok: boolean; message: string };
+  demoSimulatePairingEnded: () => { ok: boolean; message: string };
+  demoSimulateBuddyCancelled: () => { ok: boolean; message: string };
+  demoAdvanceWithin24Hours: () => { ok: boolean; message: string };
+  demoAdvanceToEventStart: () => { ok: boolean; message: string };
+  demoAdvanceToEventEnd: () => { ok: boolean; message: string };
+  demoResetClock: () => void;
 }
 
-const STORAGE_KEY = 'wathive_app_state_v16';
+const STORAGE_KEY = 'wathive_app_state_v17';
 const SAVED_FILTERS_STORAGE_KEY = 'wathive_saved_filters_v1';
 const MAX_DAILY_REQUESTS = 5;
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const stripLegacyConversationFlags = (convs: any[]): Conversation[] =>
-  convs.map(({ isBlocked: _b, isDisconnected: _d, ...rest }) => rest as Conversation);
+  (Array.isArray(convs) ? convs : [])
+    .filter((c) => Boolean(c && typeof c === 'object'))
+    .map(({ isBlocked: _b, isDisconnected: _d, ...rest }) => rest as Conversation);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const loadState = () => {
@@ -186,7 +256,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         'wathive_app_state_v12',
         'wathive_app_state_v13',
         'wathive_app_state_v14',
-        'wathive_app_state_v15'
+        'wathive_app_state_v15',
+        'wathive_app_state_v16'
       ];
 
       const stored = localStorage.getItem(STORAGE_KEY);
@@ -194,16 +265,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         legacyKeys.forEach((k) => {
           try { localStorage.removeItem(k); } catch {}
         });
-        return JSON.parse(stored);
+        const parsed = JSON.parse(stored);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
       }
 
-      // Carry forward removedChats / blockedUserIds from v15 across key bump so removed chats never resurrect
-      const prevV15 = localStorage.getItem('wathive_app_state_v15');
+      // Preserve removals/blocks from v16 while starting cleanly on updated v17 event seeds
+      const prevV16Raw = localStorage.getItem('wathive_app_state_v16');
       legacyKeys.forEach((k) => {
         try { localStorage.removeItem(k); } catch {}
       });
-      if (prevV15) {
-        return JSON.parse(prevV15);
+      if (prevV16Raw) {
+        const prevV16 = JSON.parse(prevV16Raw);
+        return {
+          removedChats: Array.isArray(prevV16?.removedChats) ? prevV16.removedChats : [],
+          blockedUserIds: Array.isArray(prevV16?.blockedUserIds) ? prevV16.blockedUserIds : [],
+          reportedUserIds: Array.isArray(prevV16?.reportedUserIds) ? prevV16.reportedUserIds : []
+        };
       }
     } catch (e) {
       console.warn('Error reading stored state:', e);
@@ -216,15 +293,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [user, setUser] = useState<UserProfile | null>(() => {
     if (initialCached?.user === undefined) return INITIAL_USER;
     if (initialCached.user === null) return null;
+    if (typeof initialCached.user !== 'object' || Array.isArray(initialCached.user)) {
+      return INITIAL_USER;
+    }
     const cachedUser = initialCached.user as UserProfile;
     const normalizedQuiz = normalizeQuizProfile(cachedUser.personalityQuiz);
     const baseUser: UserProfile = {
       ...cachedUser,
+      id: typeof cachedUser.id === 'string' && cachedUser.id ? cachedUser.id : INITIAL_USER.id,
+      name: typeof cachedUser.name === 'string' ? cachedUser.name : INITIAL_USER.name,
       personalityQuiz: normalizedQuiz
     };
     if (
       baseUser.id === 'user_alex_chen' &&
-      (!baseUser.avatar || baseUser.avatar.includes('unsplash.com'))
+      (typeof baseUser.avatar !== 'string' || !baseUser.avatar || baseUser.avatar.includes('unsplash.com'))
     ) {
       return { ...baseUser, avatar: INITIAL_USER.avatar };
     }
@@ -238,6 +320,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
   const [torontoNow, setTorontoNow] = useState<TorontoNowInfo>(() => getTorontoNow());
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [demoClockMs, setDemoClockMs] = useState<number | null>(() => readDemoClockMs());
   const lastGoodApiEventsRef = React.useRef<EventItem[]>([]);
   const lastFetchAtRef = React.useRef<number>(0);
 
@@ -274,7 +357,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [chatStore, setChatStore] = useState<ChatStateSnapshot>(() => {
     const rawBlocked: string[] = Array.isArray(initialCached?.blockedUserIds)
-      ? initialCached.blockedUserIds
+      ? initialCached.blockedUserIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
       : [];
     const rawRemoved: RemovedChatRecord[] = Array.isArray(initialCached?.removedChats)
       ? initialCached.removedChats
@@ -283,7 +366,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ? initialCached.conversations
       : INITIAL_CONVERSATIONS;
     const rawMsgs: Record<string, ChatMessage[]> =
-      initialCached?.chatMessages && typeof initialCached.chatMessages === 'object'
+      initialCached?.chatMessages &&
+      typeof initialCached.chatMessages === 'object' &&
+      !Array.isArray(initialCached.chatMessages)
         ? initialCached.chatMessages
         : INITIAL_CHAT_MESSAGES;
     const rawReqs: ConnectionRequest[] = Array.isArray(initialCached?.connectionRequests)
@@ -293,17 +378,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Migrate any legacy isBlocked/isDisconnected conversations into removedChats so they stay gone
     const migratedRemoved = [...rawRemoved];
     for (const c of rawConvs) {
+      const partnerId = typeof c?.partner?.id === 'string' ? c.partner.id : '';
+      if (!partnerId) continue;
       if (c?.isBlocked) {
-        if (!rawBlocked.includes(c.partner?.id)) rawBlocked.push(c.partner.id);
+        if (!rawBlocked.includes(partnerId)) rawBlocked.push(partnerId);
         migratedRemoved.push({
-          partnerId: c.partner.id,
+          partnerId,
           eventId: null,
           reason: 'blocked',
           removedAt: new Date().toISOString()
         });
       } else if (c?.isDisconnected) {
         migratedRemoved.push({
-          partnerId: c.partner.id,
+          partnerId,
           eventId: c.eventId ?? null,
           reason: 'left',
           removedAt: new Date().toISOString()
@@ -345,17 +432,89 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     initialCached?.declinedHistory || [] // format: `${eventId}_${senderId}_${recipientId}`
   );
   const [dailyBuddyRequestsCount, setDailyBuddyRequestsCount] = useState<number>(
-    initialCached?.dailyBuddyRequestsCount || 1 // Alex Chen sent 1 sample request
+    initialCached?.dailyBuddyRequestsCount ?? 0
   );
-  const [eventAttendeesMap] = useState<Record<string, string[]>>(
+  const [eventAttendeesMap, setEventAttendeesMap] = useState<Record<string, string[]>>(
     initialCached?.eventAttendeesMap || INITIAL_EVENT_ATTENDEES
   );
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(
     initialCached?.notificationSettings || DEFAULT_NOTIFICATION_SETTINGS
   );
-  const [notifications, setNotifications] = useState<InAppNotification[]>(
-    initialCached?.notifications || INITIAL_NOTIFICATIONS
+  const [notifications, setNotifications] = useState<InAppNotification[]>(() => {
+    const raw = Array.isArray(initialCached?.notifications)
+      ? (initialCached.notifications as InAppNotification[])
+      : INITIAL_NOTIFICATIONS;
+    return raw.filter((n) => !/^notif_[1-6]$/.test(n.id));
+  });
+  const [usedNotificationDedupeKeys, setUsedNotificationDedupeKeys] = useState<string[]>(
+    Array.isArray(initialCached?.usedNotificationDedupeKeys)
+      ? initialCached.usedNotificationDedupeKeys
+      : []
   );
+  const [pushDailyCounter, setPushDailyCounter] = useState<PushDailyCounter | null>(
+    initialCached?.pushDailyCounter || null
+  );
+  const [browserAlertsEnabled, setBrowserAlertsEnabled] = useState<boolean>(
+    Boolean(initialCached?.browserAlertsEnabled)
+  );
+  const [browserAlertPermission, setBrowserAlertPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => getBrowserNotificationPermission());
+  const [attendedEventSnapshots, setAttendedEventSnapshots] = useState<Record<string, EventItem>>(
+    initialCached?.attendedEventSnapshots && typeof initialCached.attendedEventSnapshots === 'object'
+      ? initialCached.attendedEventSnapshots
+      : {}
+  );
+  const [buddyOptInHistory, setBuddyOptInHistory] = useState<Record<string, BuddyOptInRecord>>(
+    initialCached?.buddyOptInHistory && typeof initialCached.buddyOptInHistory === 'object'
+      ? initialCached.buddyOptInHistory
+      : {}
+  );
+  const [pairingEventHistory, setPairingEventHistory] = useState<Record<string, boolean>>(() => {
+    const cached: Record<string, boolean> =
+      initialCached?.pairingEventHistory && typeof initialCached.pairingEventHistory === 'object'
+        ? { ...initialCached.pairingEventHistory }
+        : {};
+    for (const c of chatStore.conversations) {
+      cached[c.eventId] = true;
+    }
+    return cached;
+  });
+  const [endedPairingsByEvent, setEndedPairingsByEvent] = useState<Record<string, string[]>>(
+    initialCached?.endedPairingsByEvent && typeof initialCached.endedPairingsByEvent === 'object'
+      ? initialCached.endedPairingsByEvent
+      : {}
+  );
+  const [searchingReplacementEventIds, setSearchingReplacementEventIds] = useState<
+    Record<string, boolean>
+  >({});
+  const [eventSurveys, setEventSurveys] = useState<Record<string, BuddySurveySubmission>>(
+    initialCached?.eventSurveys && typeof initialCached.eventSurveys === 'object'
+      ? initialCached.eventSurveys
+      : {}
+  );
+  const [surveyDismissedEventIds, setSurveyDismissedEventIds] = useState<string[]>(
+    Array.isArray(initialCached?.surveyDismissedEventIds)
+      ? initialCached.surveyDismissedEventIds
+      : []
+  );
+
+  const [archivedConversations, setArchivedConversations] = useState<ArchivedConversationRecord[]>(() => {
+    const raw = Array.isArray(initialCached?.archivedConversations)
+      ? (initialCached.archivedConversations as ArchivedConversationRecord[])
+      : [];
+    const bootNowMs = getEffectiveNowMs(readDemoClockMs(), Date.now());
+    return purgeExpiredArchivedConversations(raw, bootNowMs, BUDDY_POLICY.archiveRetentionDays);
+  });
+  const [partnerSimulationLog, setPartnerSimulationLog] = useState<PartnerSimulationNotice[]>(() =>
+    Array.isArray(initialCached?.partnerSimulationLog)
+      ? (initialCached.partnerSimulationLog as PartnerSimulationNotice[])
+      : []
+  );
+
+  const initialMatchTimersRef = React.useRef<Record<string, number>>({});
+  const replacementTimersRef = React.useRef<Record<string, number>>({});
+  const partnerConfirmTimersRef = React.useRef<Record<string, number>>({});
 
   // Technical & Operational States (Requirement 8)
   const [aggregationSources, setAggregationSources] = useState<AggregationSource[]>(
@@ -398,6 +557,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventAttendeesMap,
       notificationSettings,
       notifications,
+      usedNotificationDedupeKeys,
+      pushDailyCounter,
+      browserAlertsEnabled,
+      attendedEventSnapshots,
+      buddyOptInHistory,
+      pairingEventHistory,
+      endedPairingsByEvent,
+      archivedConversations,
+      partnerSimulationLog,
+      eventSurveys,
+      surveyDismissedEventIds,
       aggregationSources,
       duplicateResults,
       syncReports,
@@ -422,6 +592,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventAttendeesMap,
       notificationSettings,
       notifications,
+      usedNotificationDedupeKeys,
+      pushDailyCounter,
+      browserAlertsEnabled,
+      attendedEventSnapshots,
+      buddyOptInHistory,
+      pairingEventHistory,
+      endedPairingsByEvent,
+      archivedConversations,
+      partnerSimulationLog,
+      eventSurveys,
+      surveyDismissedEventIds,
       aggregationSources,
       duplicateResults,
       syncReports,
@@ -439,7 +620,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [savedFilters]);
 
-  // Save user preferences & buddy state to localStorage (never persist events list)
+  // Save user preferences & buddy state to localStorage (never persist full events feed)
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPersistedState(chatStore)));
@@ -452,6 +633,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     (updater: (prev: ChatStateSnapshot) => ChatStateSnapshot) => {
       setChatStore((prev) => {
         const next = updater(prev);
+        latestRef.current.chatStore = next;
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPersistedState(next)));
         } catch (e) {
@@ -547,10 +729,328 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => window.clearTimeout(timer);
   }, [torontoNow]);
 
+  const effectiveNowMs = getEffectiveNowMs(demoClockMs, nowMs);
+
   const upcomingEvents = React.useMemo(() => {
-    const nowDate = new Date(nowMs);
+    const nowDate = new Date(effectiveNowMs);
     return events.filter((e) => !isEventPast(e, nowDate));
-  }, [events, nowMs]);
+  }, [events, effectiveNowMs]);
+
+  const getEventById = React.useCallback(
+    (eventId: string): EventItem | undefined =>
+      events.find((e) => e.id === eventId) || attendedEventSnapshots[eventId],
+    [events, attendedEventSnapshots]
+  );
+
+  // Snapshot any attended, saved, opted-in, or conversation event so ended events stay visible in My Events
+  useEffect(() => {
+    if (events.length === 0) return;
+    const trackedIds = new Set<string>([
+      ...attendingEventIds,
+      ...savedEventIds,
+      ...Object.keys(buddyOptInHistory),
+      ...chatStore.conversations.map((c) => c.eventId)
+    ]);
+
+    setAttendedEventSnapshots((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const ev of events) {
+        if (trackedIds.has(ev.id)) {
+          const existing = prev[ev.id];
+          if (
+            !existing ||
+            existing.date !== ev.date ||
+            existing.endTime !== ev.endTime ||
+            existing.status !== ev.status ||
+            existing.title !== ev.title
+          ) {
+            next[ev.id] = ev;
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [events, attendingEventIds, savedEventIds, buddyOptInHistory, chatStore.conversations]);
+
+  // Clean up any scheduled initial/replacement/confirmation timers on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(initialMatchTimersRef.current).forEach((t) => window.clearTimeout(t));
+      Object.values(replacementTimersRef.current).forEach((t) => window.clearTimeout(t));
+      Object.values(partnerConfirmTimersRef.current).forEach((t) => window.clearTimeout(t));
+    };
+  }, []);
+
+  // Purge archived conversations older than 30 days whenever effective clock advances
+  useEffect(() => {
+    setArchivedConversations((prev) => {
+      const pruned = purgeExpiredArchivedConversations(
+        prev,
+        effectiveNowMs,
+        BUDDY_POLICY.archiveRetentionDays
+      );
+      return pruned.length === prev.length ? prev : pruned;
+    });
+  }, [effectiveNowMs]);
+
+  const latestRef = React.useRef({
+    user,
+    attendingEventIds,
+    attendeeVisibility,
+    buddyOptInHistory,
+    endedPairingsByEvent,
+    reportedUserIds,
+    notificationSettings,
+    usedNotificationDedupeKeys,
+    pushDailyCounter,
+    browserAlertsEnabled,
+    chatStore,
+    events,
+    attendedEventSnapshots,
+    eventSocialBattery,
+    eventAttendeesMap,
+    effectiveNowMs
+  });
+
+  latestRef.current = {
+    user,
+    attendingEventIds,
+    attendeeVisibility,
+    buddyOptInHistory,
+    endedPairingsByEvent,
+    reportedUserIds,
+    notificationSettings,
+    usedNotificationDedupeKeys,
+    pushDailyCounter,
+    browserAlertsEnabled,
+    chatStore,
+    events,
+    attendedEventSnapshots,
+    eventSocialBattery,
+    eventAttendeesMap,
+    effectiveNowMs
+  };
+
+  const emitBuddyNotification = React.useCallback(
+    (params: {
+      kind: BuddyNotificationKind;
+      eventId: string;
+      eventTitle: string;
+      conversationId?: string;
+      partnerId?: string;
+      dedupeSubjectId?: string;
+      requireAttending?: boolean;
+    }): boolean => {
+      const latest = latestRef.current;
+      const {
+        kind,
+        eventId,
+        eventTitle,
+        conversationId,
+        partnerId,
+        dedupeSubjectId,
+        requireAttending = true
+      } = params;
+
+      const dedupeKey = buildNotificationDedupeKey(
+        kind,
+        eventId,
+        dedupeSubjectId ?? conversationId ?? partnerId
+      );
+
+      const ev =
+        latest.events.find((e) => e.id === eventId) ||
+        latest.attendedEventSnapshots[eventId];
+      const eventStartMs = ev ? getEventStartUtcMs(ev) : undefined;
+      const hasActivePairing = latest.chatStore.conversations.some((c) => c.eventId === eventId);
+      const optIn = latest.buddyOptInHistory[eventId];
+      const optedInBeforeStart = Boolean(optIn?.active && optIn?.optedInBeforeStart);
+      const isAttendingEvent = requireAttending
+        ? latest.attendingEventIds.includes(eventId)
+        : true;
+
+      const allowed = canCreateBuddyNotification({
+        kind,
+        dedupeKey,
+        usedDedupeKeys: latest.usedNotificationDedupeKeys,
+        buddyMatchesEnabled: latest.notificationSettings.types.buddyMatches,
+        isAttendingEvent,
+        optedInBeforeStart,
+        hasActivePairingForEvent: hasActivePairing,
+        eventStartMs,
+        nowMs: latest.effectiveNowMs
+      });
+
+      if (!allowed) return false;
+
+      // Update ref synchronously to prevent duplicate triggers within same tick
+      latestRef.current.usedNotificationDedupeKeys = [
+        ...latest.usedNotificationDedupeKeys,
+        dedupeKey
+      ];
+      setUsedNotificationDedupeKeys((prev) =>
+        prev.includes(dedupeKey) ? prev : [...prev, dedupeKey]
+      );
+
+      const newNotif = createBuddyNotificationItem({
+        kind,
+        eventId,
+        eventTitle,
+        dedupeKey,
+        conversationId,
+        partnerId,
+        nowMs: latest.effectiveNowMs
+      });
+
+      setNotifications((prev) => [newNotif, ...prev]);
+
+      const nowDate = new Date(latest.effectiveNowMs);
+      const permission = getBrowserNotificationPermission();
+      setBrowserAlertPermission(permission);
+
+      if (
+        canSendBrowserPush({
+          browserAlertsEnabled: latest.browserAlertsEnabled,
+          permission,
+          settings: latest.notificationSettings,
+          pushDailyCounter: latest.pushDailyCounter,
+          nowDate,
+          cap: BUDDY_POLICY.pushDailyCap
+        })
+      ) {
+        const sent = showBrowserNotification(newNotif.title, newNotif.message, dedupeKey);
+        if (sent) {
+          const todayStr = getTorontoNow(nowDate).dateStr;
+          const nextCounter = incrementPushDailyCounter(latest.pushDailyCounter, todayStr);
+          latestRef.current.pushDailyCounter = nextCounter;
+          setPushDailyCounter(nextCounter);
+        }
+      }
+
+      return true;
+    },
+    []
+  );
+
+  const archiveConversationsList = React.useCallback(
+    (
+      convsToArchive: Conversation[],
+      chatMsgsSnapshot: Record<string, ChatMessage[]>,
+      closedAtMs: number
+    ) => {
+      if (convsToArchive.length === 0) return;
+      const currentUserId = latestRef.current.user?.id;
+      const newRecords = convsToArchive.map((conv) =>
+        createArchivedConversationRecord({
+          conversation: conv,
+          messages: chatMsgsSnapshot[conv.id] || [],
+          userId: currentUserId,
+          closedAtMs
+        })
+      );
+      setArchivedConversations((prev) => {
+        const existingIds = new Set(newRecords.map((r) => r.id));
+        const combined = [...newRecords, ...prev.filter((r) => !existingIds.has(r.id))];
+        return purgeExpiredArchivedConversations(
+          combined,
+          closedAtMs,
+          BUDDY_POLICY.archiveRetentionDays
+        );
+      });
+    },
+    []
+  );
+
+  const quietlyEndPairingsForEvent = React.useCallback((eventId: string) => {
+    if (initialMatchTimersRef.current[eventId]) {
+      window.clearTimeout(initialMatchTimersRef.current[eventId]);
+      delete initialMatchTimersRef.current[eventId];
+    }
+    if (replacementTimersRef.current[eventId]) {
+      window.clearTimeout(replacementTimersRef.current[eventId]);
+      delete replacementTimersRef.current[eventId];
+    }
+    setSearchingReplacementEventIds((prev) => {
+      if (!prev[eventId]) return prev;
+      const next = { ...prev };
+      delete next[eventId];
+      return next;
+    });
+
+    const activeConvsForEvent = latestRef.current.chatStore.conversations.filter(
+      (c) => c.eventId === eventId
+    );
+    archiveConversationsList(
+      activeConvsForEvent,
+      latestRef.current.chatStore.chatMessages,
+      latestRef.current.effectiveNowMs
+    );
+    for (const c of activeConvsForEvent) {
+      if (partnerConfirmTimersRef.current[c.id]) {
+        window.clearTimeout(partnerConfirmTimersRef.current[c.id]);
+        delete partnerConfirmTimersRef.current[c.id];
+      }
+    }
+
+    updateChatStoreAndPersist((prev) => {
+      const removedConvIds = new Set(
+        prev.conversations.filter((c) => c.eventId === eventId).map((c) => c.id)
+      );
+      if (removedConvIds.size === 0 && !prev.connectionRequests.some((r) => r.eventId === eventId && r.status === 'pending')) {
+        return prev;
+      }
+      const nextMessages: Record<string, ChatMessage[]> = {};
+      for (const [cid, msgs] of Object.entries(prev.chatMessages)) {
+        if (!removedConvIds.has(cid)) {
+          nextMessages[cid] = msgs;
+        }
+      }
+      return {
+        ...prev,
+        conversations: prev.conversations.filter((c) => c.eventId !== eventId),
+        chatMessages: nextMessages,
+        connectionRequests: prev.connectionRequests.map((r) =>
+          r.eventId === eventId && r.status === 'pending'
+            ? { ...r, status: 'withdrawn' as const }
+            : r
+        )
+      };
+    });
+  }, [archiveConversationsList, updateChatStoreAndPersist]);
+
+  // Check for "no match found" notification when an opted-in upcoming event begins (< 24h elapsed)
+  useEffect(() => {
+    if (!user || !notificationSettings.types.buddyMatches) return;
+    for (const eventId of attendingEventIds) {
+      const optIn = buddyOptInHistory[eventId];
+      if (!optIn?.active || !optIn.optedInBeforeStart) continue;
+      if (chatStore.conversations.some((c) => c.eventId === eventId)) continue;
+      const ev = events.find((e) => e.id === eventId) || attendedEventSnapshots[eventId];
+      if (!ev || ev.isResearchStudy || ev.status === 'cancelled') continue;
+      const startMs = getEventStartUtcMs(ev);
+      if (!Number.isFinite(startMs)) continue;
+      const elapsedMs = effectiveNowMs - startMs;
+      if (elapsedMs >= 0 && elapsedMs < 24 * 60 * 60 * 1000) {
+        emitBuddyNotification({
+          kind: 'no_match_found',
+          eventId,
+          eventTitle: ev.title
+        });
+      }
+    }
+  }, [
+    user,
+    effectiveNowMs,
+    events,
+    attendedEventSnapshots,
+    attendingEventIds,
+    buddyOptInHistory,
+    chatStore.conversations,
+    notificationSettings.types.buddyMatches,
+    emitBuddyNotification
+  ]);
 
   const loginDemoUser = (asNewUser = false) => {
     if (asNewUser) {
@@ -646,27 +1146,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...user,
       personalityQuiz: completedQuiz
     };
+    latestRef.current.user = updatedUser;
     setUser(updatedUser);
 
-    // Pre-populate mock Match Invitations based on new answers + preference filters
-    // and refresh Icebreaker Hooks on active conversations without resurrecting removed/blocked chats.
-    const fallbackEvents = [
-      { id: 'wusa_247403', title: 'Campus Social Mixer @ SLC', date: torontoNow.dateStr },
-      { id: 'wusa_250173', title: 'Waterloo Student Night Market', date: torontoNow.dateStr },
-      { id: 'wusa_249683', title: 'Trivia & Board Games Night', date: torontoNow.dateStr }
-    ];
-    const candidateEvents =
-      upcomingEvents.length > 0
-        ? upcomingEvents.filter((e) => !e.isResearchStudy && e.status === 'published')
-        : fallbackEvents;
-
+    // Refresh Icebreaker Hooks on active conversations without generating legacy request invitations
     updateChatStoreAndPersist((prev) => {
-      // Refresh Icebreaker Hooks on existing conversations
       const updatedConversations = prev.conversations.map((conv) => {
-        const partnerProfile = SAMPLE_ATTENDEES[conv.partner.id] || conv.partner;
+        const partnerId = conv?.partner?.id;
+        const partnerProfile = (partnerId && SAMPLE_ATTENDEES[partnerId]) || conv.partner;
         const compat = calculateCompatibility(
           completedQuiz,
-          partnerProfile.personalityQuiz,
+          partnerProfile?.personalityQuiz,
           updatedUser,
           partnerProfile,
           eventSocialBattery[conv.eventId] || conv.socialBattery,
@@ -682,64 +1172,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       });
 
-      const activePartnerIds = new Set(updatedConversations.map((c) => c.partner.id));
-      const candidates = Object.values(SAMPLE_ATTENDEES)
-        .filter((att) => att.id !== updatedUser.id && att.isVerifiedUWStudent)
-        .map((att, idx) => {
-          const ev = candidateEvents[idx % candidateEvents.length] || fallbackEvents[0];
-          const compat = calculateCompatibility(
-            completedQuiz,
-            att.personalityQuiz,
-            updatedUser,
-            att,
-            eventSocialBattery[ev.id],
-            ev.id,
-            ev.title
-          );
-          return { attendee: att, event: ev, compat };
-        })
-        .filter(
-          ({ attendee, event, compat }) =>
-            !compat.filteredOut &&
-            !activePartnerIds.has(attendee.id) &&
-            !isChatRemovedForPair(attendee.id, event.id, prev.removedChats, prev.blockedUserIds)
-        )
-        .sort((a, b) => b.compat.score - a.compat.score)
-        .slice(0, 3);
-
-      // Keep user's non-pending or outgoing requests intact; replace auto-generated pending incoming invitations
-      const preservedRequests = prev.connectionRequests.filter(
-        (r) => !(r.recipientId === updatedUser.id && r.status === 'pending')
-      );
-
-      const freshInvitations: ConnectionRequest[] = candidates.map(({ attendee, event, compat }, idx) => ({
-        id: `req_quiz_${attendee.id}_${Date.now()}_${idx}`,
-        eventId: event.id,
-        eventTitle: event.title,
-        eventDate: event.date,
-        senderId: attendee.id,
-        senderName: attendee.name,
-        senderAvatar: attendee.avatar,
-        senderFaculty: attendee.faculty,
-        senderProgram: attendee.program,
-        senderYear: attendee.year,
-        recipientId: updatedUser.id,
-        recipientName: formatPublicName(updatedUser.name),
-        introMessage: `Hey ${formatPublicName(updatedUser.name)}! Saw we matched on WatHive for ${event.title}. Want to head over together?`,
-        compatibilityScore: compat.score,
-        compatibilityReasons: compat.reasons,
-        icebreakerPill: compat.icebreakerPill,
-        icebreakerBanner: compat.icebreakerBanner,
-        icebreakerQuestion: compat.icebreakerQuestion,
-        socialBattery: attendee.defaultSocialBattery,
-        status: 'pending',
-        createdAt: new Date().toISOString()
-      }));
-
       return {
         ...prev,
-        conversations: updatedConversations,
-        connectionRequests: [...freshInvitations, ...preservedRequests]
+        conversations: updatedConversations
       };
     });
   };
@@ -810,111 +1245,209 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Requirement B: "If an RSVP is cancelled, the user should no longer be eligible for a new match for that event."
+  // If student leaves the event, quietly end their pairings and stop any replacement search with no matching notifications.
   const toggleGoing = (eventId: string) => {
-    setAttendingEventIds((prev) => {
-      const isCurrentlyGoing = prev.includes(eventId);
-      if (isCurrentlyGoing) {
-        // Leaving event also completely turns off buddy matching visibility for this event
-        setAttendeeVisibilityMap((v) => {
-          const next = { ...v };
-          delete next[eventId];
-          return next;
-        });
-        return prev.filter((id) => id !== eventId);
-      } else {
-        return [...prev, eventId];
+    const isCurrentlyGoing = attendingEventIds.includes(eventId);
+    if (isCurrentlyGoing) {
+      latestRef.current.attendingEventIds = latestRef.current.attendingEventIds.filter(
+        (id) => id !== eventId
+      );
+      setAttendingEventIds((prev) => prev.filter((id) => id !== eventId));
+
+      const nextVis = { ...latestRef.current.attendeeVisibility };
+      delete nextVis[eventId];
+      latestRef.current.attendeeVisibility = nextVis;
+      setAttendeeVisibilityMap((v) => {
+        const next = { ...v };
+        delete next[eventId];
+        return next;
+      });
+
+      if (latestRef.current.buddyOptInHistory[eventId]) {
+        latestRef.current.buddyOptInHistory = {
+          ...latestRef.current.buddyOptInHistory,
+          [eventId]: { ...latestRef.current.buddyOptInHistory[eventId], active: false }
+        };
       }
-    });
+      setBuddyOptInHistory((prev) =>
+        prev[eventId] ? { ...prev, [eventId]: { ...prev[eventId], active: false } } : prev
+      );
+      quietlyEndPairingsForEvent(eventId);
+    } else {
+      const ev = getEventById(eventId);
+      if (ev) {
+        latestRef.current.attendedEventSnapshots = {
+          ...latestRef.current.attendedEventSnapshots,
+          [eventId]: ev
+        };
+        setAttendedEventSnapshots((prev) => ({ ...prev, [eventId]: ev }));
+      }
+      if (!latestRef.current.attendingEventIds.includes(eventId)) {
+        latestRef.current.attendingEventIds = [...latestRef.current.attendingEventIds, eventId];
+      }
+      setAttendingEventIds((prev) => (prev.includes(eventId) ? prev : [...prev, eventId]));
+    }
   };
 
-  // Explicit opt-in for buddy matching ("I want to go with someone!") per event
+  // One-tap automatic best-match opt-in per event
   const enableBuddyMatching = (
     eventId: string,
     settings: BuddyPrivacySettings
   ): { success: boolean; message: string } => {
-    if (!user) return { success: false, message: 'Please sign in first.' };
+    const activeUser = latestRef.current.user || user;
+    if (!activeUser) return { success: false, message: 'Please sign in first.' };
 
     // Requirement C: Restrict buddy matching to verified UW students
-    if (!user.isVerifiedUWStudent) {
+    if (!activeUser.isVerifiedUWStudent) {
       return {
         success: false,
         message: 'Verification required: You must be a verified University of Waterloo student to enable buddy matching.'
       };
     }
 
+    const ev = getEventById(eventId);
+    if (ev) {
+      latestRef.current.attendedEventSnapshots = {
+        ...latestRef.current.attendedEventSnapshots,
+        [eventId]: ev
+      };
+      setAttendedEventSnapshots((prev) => ({ ...prev, [eventId]: ev }));
+    }
+
     // Requirement B: User must be RSVP'd to the event
-    if (!attendingEventIds.includes(eventId)) {
-      setAttendingEventIds((prev) => [...prev, eventId]);
+    if (!latestRef.current.attendingEventIds.includes(eventId)) {
+      latestRef.current.attendingEventIds = [...latestRef.current.attendingEventIds, eventId];
+      setAttendingEventIds((prev) => (prev.includes(eventId) ? prev : [...prev, eventId]));
     }
 
     setEventBuddySettings((prev) => ({
       ...prev,
       [eventId]: settings
     }));
+
+    latestRef.current.attendeeVisibility = {
+      ...latestRef.current.attendeeVisibility,
+      [eventId]: true
+    };
     setAttendeeVisibilityMap((prev) => ({
       ...prev,
       [eventId]: true
     }));
 
+    const startMs = ev ? getEventStartUtcMs(ev) : NaN;
+    const optedInBeforeStart = Number.isFinite(startMs) ? effectiveNowMs < startMs : true;
+    const prevOptIn = latestRef.current.buddyOptInHistory[eventId];
+    const nextOptIn: BuddyOptInRecord = {
+      optedInAtMs: prevOptIn?.optedInAtMs ?? effectiveNowMs,
+      optedInBeforeStart: prevOptIn?.optedInBeforeStart ?? optedInBeforeStart,
+      active: true
+    };
+    latestRef.current.buddyOptInHistory = {
+      ...latestRef.current.buddyOptInHistory,
+      [eventId]: nextOptIn
+    };
+    setBuddyOptInHistory((prev) => ({
+      ...prev,
+      [eventId]: {
+        optedInAtMs: prev[eventId]?.optedInAtMs ?? effectiveNowMs,
+        optedInBeforeStart: prev[eventId]?.optedInBeforeStart ?? optedInBeforeStart,
+        active: true
+      }
+    }));
+
+    // Enter brief searching state (~2s) before creating provisional best-match pairing
+    if (
+      ev &&
+      !ev.isResearchStudy &&
+      ev.status !== 'cancelled' &&
+      !isEventPast(ev, new Date(latestRef.current.effectiveNowMs)) &&
+      !latestRef.current.chatStore.conversations.some((c) => c.eventId === eventId)
+    ) {
+      if (initialMatchTimersRef.current[eventId]) {
+        window.clearTimeout(initialMatchTimersRef.current[eventId]);
+      }
+      if (replacementTimersRef.current[eventId]) {
+        window.clearTimeout(replacementTimersRef.current[eventId]);
+        delete replacementTimersRef.current[eventId];
+      }
+      setSearchingReplacementEventIds((prev) => ({ ...prev, [eventId]: true }));
+
+      initialMatchTimersRef.current[eventId] = window.setTimeout(() => {
+        delete initialMatchTimersRef.current[eventId];
+        setSearchingReplacementEventIds((prev) => {
+          if (!prev[eventId]) return prev;
+          const next = { ...prev };
+          delete next[eventId];
+          return next;
+        });
+
+        const latest = latestRef.current;
+        if (!latest.user || !latest.user.isVerifiedUWStudent) return;
+        if (!latest.attendingEventIds.includes(eventId)) return;
+        if (!latest.attendeeVisibility[eventId]) return;
+        if (latest.chatStore.conversations.some((c) => c.eventId === eventId)) return;
+
+        const targetEv =
+          latest.events.find((e) => e.id === eventId) ||
+          latest.attendedEventSnapshots[eventId];
+        if (!targetEv || targetEv.isResearchStudy || targetEv.status === 'cancelled') return;
+        if (isEventPast(targetEv, new Date(latest.effectiveNowMs))) return;
+
+        createProvisionalMatchForEvent(
+          targetEv,
+          'provisional_match',
+          latest.endedPairingsByEvent[eventId] || []
+        );
+      }, BUDDY_POLICY.initialMatchDelayMs);
+    }
+
     return {
       success: true,
-      message: 'Buddy matching enabled! You can now explore compatible attendees for this event.'
+      message: 'Finding your buddy.'
     };
   };
 
-  // Turn off buddy matching visibility at any time
+  // Turn off buddy matching visibility at any time: quietly end pairings & stop replacement search with no notifications
   const disableBuddyMatching = (eventId: string) => {
+    latestRef.current.attendeeVisibility = {
+      ...latestRef.current.attendeeVisibility,
+      [eventId]: false
+    };
     setAttendeeVisibilityMap((prev) => ({
       ...prev,
       [eventId]: false
     }));
+    if (latestRef.current.buddyOptInHistory[eventId]) {
+      latestRef.current.buddyOptInHistory = {
+        ...latestRef.current.buddyOptInHistory,
+        [eventId]: { ...latestRef.current.buddyOptInHistory[eventId], active: false }
+      };
+    }
+    setBuddyOptInHistory((prev) =>
+      prev[eventId] ? { ...prev, [eventId]: { ...prev[eventId], active: false } } : prev
+    );
+    quietlyEndPairingsForEvent(eventId);
   };
 
-  // Attendees list: filtered by event, opt-in status, research exclusion, blocked/reported/left pairs
+  // Deterministic 1–3 buddy seekers per active event (excludes signed-in user, blocked, reported, left, ended, already paired)
   const getEventAttendees = (eventId: string): AttendeeProfile[] => {
     const event = upcomingEvents.find((e) => e.id === eventId);
-    if (!event || event.isResearchStudy || event.status === 'cancelled' || event.status === 'ended') {
-      return [];
-    }
+    if (!event) return [];
 
-    const attendeeIds = eventAttendeesMap[eventId] || [];
-    const profiles: AttendeeProfile[] = [];
-
-    for (const id of attendeeIds) {
-      const attendee = SAMPLE_ATTENDEES[id];
-      if (
-        attendee &&
-        attendee.isVerifiedUWStudent &&
-        !isChatRemovedForPair(id, eventId, removedChats, blockedUserIds)
-      ) {
-        profiles.push(attendee);
-      }
-    }
-
-    // If current user opted in to buddy matching for this event, show user's preview card
-    if (user && attendingEventIds.includes(eventId) && attendeeVisibility[eventId]) {
-      const settings = eventBuddySettings[eventId] || {
-        showFaculty: true,
-        showYear: true,
-        shortIntro: user.bio || ''
-      };
-
-      profiles.unshift({
-        id: user.id,
-        name: `${formatPublicName(user.name)} (You)`,
-        avatar: user.avatar,
-        faculty: settings.showFaculty ? user.faculty : undefined,
-        program: settings.showFaculty ? user.program : undefined,
-        year: settings.showYear ? user.year : undefined,
-        bio: settings.shortIntro || undefined,
-        showFaculty: settings.showFaculty,
-        showYear: settings.showYear,
-        isVerifiedUWStudent: user.isVerifiedUWStudent,
-        personalityQuiz: user.personalityQuiz
-      });
-    }
-
-    return profiles;
+    return getSeedBuddySeekers(eventId, {
+      pool: Object.values(SAMPLE_ATTENDEES),
+      isPast: isEventPast(event, new Date(effectiveNowMs)),
+      isResearchStudy: event.isResearchStudy,
+      status: event.status,
+      signedInUserId: user?.id,
+      blockedUserIds,
+      reportedUserIds,
+      removedChats,
+      activePairingPartnerIds: conversations
+        .filter((c) => c.eventId === eventId && Boolean(c.partner?.id))
+        .map((c) => c.partner.id),
+      endedPartnerIds: endedPairingsByEvent[eventId] || []
+    });
   };
 
   // Get prioritized compatible suggested matches for a specific event
@@ -924,49 +1457,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return [];
     }
 
-    const attendeeIds = eventAttendeesMap[eventId] || [];
-    const matches: SuggestedMatchItem[] = [];
+    const seekers = getEventAttendees(eventId);
     const userEventBattery = eventSocialBattery[eventId];
+    const matches: SuggestedMatchItem[] = [];
 
-    for (const id of attendeeIds) {
-      const attendee = SAMPLE_ATTENDEES[id];
-      if (
-        attendee &&
-        attendee.isVerifiedUWStudent &&
-        !isChatRemovedForPair(id, eventId, removedChats, blockedUserIds)
-      ) {
-        const compatibility = calculateCompatibility(
-          user?.personalityQuiz || DEFAULT_ALEX_QUIZ,
-          attendee.personalityQuiz,
-          user,
-          attendee,
-          userEventBattery,
-          eventId,
-          event.title
-        );
-        if (!compatibility.filteredOut) {
-          matches.push({ attendee, compatibility });
-        }
+    for (const attendee of seekers) {
+      const compatibility = calculateCompatibility(
+        user?.personalityQuiz || DEFAULT_ALEX_QUIZ,
+        attendee.personalityQuiz,
+        user,
+        attendee,
+        userEventBattery,
+        eventId,
+        event.title
+      );
+      if (!compatibility.filteredOut) {
+        matches.push({ attendee, compatibility });
       }
     }
 
-    // Sort by highest compatibility score first!
-    return matches.sort((a, b) => b.compatibility.score - a.compatibility.score);
+    return matches.sort((a, b) => {
+      if (b.compatibility.score !== a.compatibility.score) {
+        return b.compatibility.score - a.compatibility.score;
+      }
+      return a.attendee.id.localeCompare(b.attendee.id);
+    });
   };
 
-  // Send request with compatibility calculation and verification checks
+  // Send request immediately (no form or required text)
   const sendConnectionRequest = (
     eventId: string,
     recipientId: string,
     introMessage = ''
   ): { success: boolean; message: string } => {
-    if (!user) return { success: false, message: 'Please log in to send requests.' };
+    if (!user) return { success: false, message: 'Please sign in first.' };
 
-    // Requirement C: Must be verified UW student
     if (!user.isVerifiedUWStudent) {
       return {
         success: false,
-        message: 'University of Waterloo student verification is required before sending buddy requests.'
+        message: 'Verify your @uwaterloo.ca email to send buddy requests.'
       };
     }
 
@@ -974,11 +1503,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!event) return { success: false, message: 'Event not found.' };
 
     if (event.isResearchStudy) {
-      return { success: false, message: 'Buddy matching is strictly disabled for research studies.' };
+      return { success: false, message: 'Buddy matching is off for research studies.' };
     }
 
     if (event.status === 'ended' || event.status === 'cancelled') {
       return { success: false, message: 'Buddy requests are closed for this event.' };
+    }
+
+    // One active pairing per event
+    if (conversations.some((c) => c.eventId === eventId)) {
+      return { success: false, message: 'You already have a buddy for this event.' };
     }
 
     const removalCheck = getRequestRejectionForRemovedChat(
@@ -988,27 +1522,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       blockedUserIds
     );
     if (removalCheck.blocked) {
-      return { success: false, message: removalCheck.message };
+      return { success: false, message: removalCheck.message || 'Cannot send request.' };
     }
 
-    // Daily limit enforcement (Max 5 requests per day)
     if (dailyBuddyRequestsCount >= MAX_DAILY_REQUESTS) {
       return {
         success: false,
-        message: `Daily limit reached: You can send up to ${MAX_DAILY_REQUESTS} buddy requests per day to protect student privacy and comfort.`
+        message: 'Daily limit reached.'
       };
     }
 
-    // Check if previously declined for this same event
     const declineKey = `${eventId}_${user.id}_${recipientId}`;
     if (declinedHistory.includes(declineKey)) {
       return {
         success: false,
-        message: 'A previous request for this event was declined. Further requests for this event are not permitted.'
+        message: 'Request declined for this event.'
       };
     }
 
-    // Check if single pending or accepted request already exists
     const existing = connectionRequests.find(
       (r) =>
         r.eventId === eventId &&
@@ -1022,8 +1553,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         success: false,
         message:
           existing.status === 'pending'
-            ? 'You already have a pending request with this attendee for this event.'
-            : 'You are already connected with this attendee!'
+            ? 'Request already sent.'
+            : 'Already matched for this event.'
       };
     }
 
@@ -1031,8 +1562,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!recipient || !recipient.isVerifiedUWStudent) {
       return {
         success: false,
-        message: 'This attendee is currently not verified for buddy matching.'
+        message: 'This student is not available for buddy matching.'
       };
+    }
+
+    // Ensure attending + opted-in so notifications and survey eligibility work cleanly
+    setAttendedEventSnapshots((prev) => ({ ...prev, [eventId]: event }));
+    if (!attendingEventIds.includes(eventId)) {
+      latestRef.current.attendingEventIds = [...latestRef.current.attendingEventIds, eventId];
+      setAttendingEventIds((prev) => (prev.includes(eventId) ? prev : [...prev, eventId]));
+    }
+    if (!attendeeVisibility[eventId]) {
+      latestRef.current.attendeeVisibility = {
+        ...latestRef.current.attendeeVisibility,
+        [eventId]: true
+      };
+      setAttendeeVisibilityMap((prev) => ({ ...prev, [eventId]: true }));
+      const startMs = getEventStartUtcMs(event);
+      const optedInBeforeStart = Number.isFinite(startMs) ? effectiveNowMs < startMs : true;
+      const optRec: BuddyOptInRecord = {
+        optedInAtMs: effectiveNowMs,
+        optedInBeforeStart,
+        active: true
+      };
+      latestRef.current.buddyOptInHistory = {
+        ...latestRef.current.buddyOptInHistory,
+        [eventId]: optRec
+      };
+      setBuddyOptInHistory((prev) => ({ ...prev, [eventId]: optRec }));
     }
 
     const userSettings = eventBuddySettings[eventId] || {
@@ -1041,7 +1598,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       shortIntro: ''
     };
 
-    // Calculate real weighted compatibility score (40% Quiz, 40% Social Battery, 20% Preferences)
     const compatResult = calculateCompatibility(
       user.personalityQuiz || DEFAULT_ALEX_QUIZ,
       recipient.personalityQuiz,
@@ -1082,19 +1638,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
     setDailyBuddyRequestsCount((prev) => prev + 1);
 
-    // Simulate realistic acceptance after 4.5 seconds (only if still pending and not blocked/removed)
-    setTimeout(() => {
+    // Simulated seeker accepts a few seconds later (creates one deterministic provisional conversation)
+    window.setTimeout(() => {
+      const convId = getMatchConversationId(eventId, recipientId);
+      let createdMatch = false;
+      const userFirst = getFirstName(user.name);
+      const cleanGreeting = `Hey ${userFirst}! I'd love to head to ${event.title} together.`;
+
       updateChatStoreAndPersist((prev) => {
         const liveReq = prev.connectionRequests.find((r) => r.id === newReq.id);
         if (
           !liveReq ||
           liveReq.status !== 'pending' ||
+          !latestRef.current.attendingEventIds.includes(eventId) ||
+          !latestRef.current.attendeeVisibility[eventId] ||
           isChatRemovedForPair(recipientId, eventId, prev.removedChats, prev.blockedUserIds)
         ) {
           return prev;
         }
 
-        const convId = `conv_${recipientId}_${Date.now()}`;
+        // Enforce deterministic single pairing per event
+        const alreadyPairedForEvent = prev.conversations.some(
+          (c) => c.id === convId || c.eventId === eventId
+        );
+        if (alreadyPairedForEvent) {
+          return {
+            ...prev,
+            connectionRequests: prev.connectionRequests.map((req) =>
+              req.id === newReq.id ? { ...req, status: 'withdrawn' as const } : req
+            )
+          };
+        }
+
+        createdMatch = true;
+
         const newConv: Conversation = {
           id: convId,
           eventId,
@@ -1102,9 +1679,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           eventDate: event.date,
           eventLocation: event.location,
           partner: recipient,
-          lastMessage: `Hey ${formatPublicName(user.name)}! I accepted your request to attend ${event.title} together (${compatResult.score}% match!). Looking forward to it!`,
+          lastMessage: cleanGreeting,
           lastMessageTime: 'Just now',
           unreadCount: 1,
+          pairingStatus: 'provisional',
+          userConfirmed: false,
+          partnerConfirmed: false,
           isReported: false,
           stayConnectedUser: false,
           stayConnectedPartner: false,
@@ -1116,6 +1696,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
 
         const msgs: ChatMessage[] = [
+          {
+            id: `m_sys_match_${convId}`,
+            conversationId: convId,
+            senderId: 'system',
+            text: "You've been matched. Say hello. Nothing is final until you both confirm.",
+            timestamp: 'Just now'
+          },
           ...(introMessage
             ? [
                 {
@@ -1128,10 +1715,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               ]
             : []),
           {
-            id: `m_reply_${Date.now()}`,
+            id: `m_reply_${Date.now() + 1}`,
             conversationId: convId,
             senderId: recipient.id,
-            text: `Hey ${formatPublicName(user.name)}! I accepted your request to attend ${event.title} together (${compatResult.score}% compatibility!). Looking forward to meeting up!`,
+            text: cleanGreeting,
             timestamp: 'Just now'
           }
         ];
@@ -1148,15 +1735,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         };
       });
-    }, 4500);
+
+      if (createdMatch) {
+        setPairingEventHistory((prev) => ({ ...prev, [eventId]: true }));
+        setSearchingReplacementEventIds((prev) => {
+          if (!prev[eventId]) return prev;
+          const next = { ...prev };
+          delete next[eventId];
+          return next;
+        });
+        emitBuddyNotification({
+          kind: 'provisional_match',
+          eventId,
+          eventTitle: event.title,
+          conversationId: convId,
+          partnerId: recipientId
+        });
+      }
+    }, 3500);
 
     return {
       success: true,
-      message: `Request sent (${compatResult.score}% match)! Chat will unlock once accepted by the attendee.`
+      message: 'Request sent.'
     };
   };
 
-  // Accept or decline without providing reason; enforce no re-request after decline
+  // Accept or decline incoming request; accepting creates same provisional conversation with no extra notification
   const respondConnectionRequest = (requestId: string, action: 'accept' | 'decline') => {
     const req = connectionRequests.find((r) => r.id === requestId);
     if (!req) return;
@@ -1197,21 +1801,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const icebreakerBanner = req.icebreakerBanner || liveCompat.icebreakerBanner;
     const icebreakerQuestion = req.icebreakerQuestion || liveCompat.icebreakerQuestion;
 
+    const convId = getMatchConversationId(req.eventId, partner.id);
+    const linkedEv = getEventById(req.eventId);
+
+    if (linkedEv) {
+      setAttendedEventSnapshots((prev) => ({ ...prev, [req.eventId]: linkedEv }));
+    }
+    if (!attendingEventIds.includes(req.eventId)) {
+      latestRef.current.attendingEventIds = [...latestRef.current.attendingEventIds, req.eventId];
+      setAttendingEventIds((prev) => (prev.includes(req.eventId) ? prev : [...prev, req.eventId]));
+    }
+    if (!attendeeVisibility[req.eventId]) {
+      latestRef.current.attendeeVisibility = {
+        ...latestRef.current.attendeeVisibility,
+        [req.eventId]: true
+      };
+      setAttendeeVisibilityMap((prev) => ({ ...prev, [req.eventId]: true }));
+      const startMs = linkedEv ? getEventStartUtcMs(linkedEv) : NaN;
+      const beforeStart = Number.isFinite(startMs) ? effectiveNowMs < startMs : true;
+      const optRec: BuddyOptInRecord = {
+        optedInAtMs: effectiveNowMs,
+        optedInBeforeStart: beforeStart,
+        active: true
+      };
+      latestRef.current.buddyOptInHistory = {
+        ...latestRef.current.buddyOptInHistory,
+        [req.eventId]: optRec
+      };
+      setBuddyOptInHistory((prev) => ({ ...prev, [req.eventId]: optRec }));
+    }
+
     updateChatStoreAndPersist((prev) => {
       if (isChatRemovedForPair(partner.id, req.eventId, prev.removedChats, prev.blockedUserIds)) {
         return prev;
       }
-      const convId = `conv_${req.senderId}_${Date.now()}`;
+      const alreadyPairedForEvent = prev.conversations.some(
+        (c) => c.id === convId || c.eventId === req.eventId
+      );
+      const replyGreeting = `Hey ${getFirstName(partner.name)}! Excited to check out ${req.eventTitle} together.`;
       const newConv: Conversation = {
         id: convId,
         eventId: req.eventId,
         eventTitle: req.eventTitle,
         eventDate: req.eventDate,
-        eventLocation: 'Campus Venue',
+        eventLocation: linkedEv?.location || 'Campus Venue',
         partner,
-        lastMessage: req.introMessage || `Hey ${partner.name}! Excited to check out ${req.eventTitle} together!`,
+        lastMessage: req.introMessage || replyGreeting,
         lastMessageTime: 'Just now',
         unreadCount: 0,
+        pairingStatus: 'provisional',
+        userConfirmed: false,
+        partnerConfirmed: false,
         isReported: false,
         stayConnectedUser: false,
         stayConnectedPartner: false,
@@ -1223,6 +1863,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
 
       const msgs: ChatMessage[] = [
+        {
+          id: `m_sys_match_${convId}`,
+          conversationId: convId,
+          senderId: 'system',
+          text: "You've been matched. Say hello. Nothing is final until you both confirm.",
+          timestamp: 'Just now'
+        },
         ...(req.introMessage
           ? [
               {
@@ -1238,7 +1885,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           id: `m_accept_${Date.now() + 2}`,
           conversationId: convId,
           senderId: user?.id || 'me',
-          text: `Hey ${partner.name}! Excited to check out ${req.eventTitle} together!`,
+          text: replyGreeting,
           timestamp: 'Just now'
         }
       ];
@@ -1248,18 +1895,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         connectionRequests: prev.connectionRequests.map((r) =>
           r.id === requestId ? { ...r, status: 'accepted' } : r
         ),
-        conversations: [
-          newConv,
-          ...prev.conversations.filter(
-            (c) => !(c.partner.id === partner.id && c.eventId === req.eventId)
-          )
-        ],
-        chatMessages: {
-          ...prev.chatMessages,
-          [convId]: msgs
-        }
+        conversations: alreadyPairedForEvent
+          ? prev.conversations
+          : [newConv, ...prev.conversations],
+        chatMessages: alreadyPairedForEvent
+          ? prev.chatMessages
+          : {
+              ...prev.chatMessages,
+              [convId]: msgs
+            }
       };
     });
+    setPairingEventHistory((prev) => ({ ...prev, [req.eventId]: true }));
   };
 
   const withdrawConnectionRequest = (requestId: string) => {
@@ -1271,8 +1918,165 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
   };
 
+  const markConversationRead = React.useCallback(
+    (conversationId: string) => {
+      updateChatStoreAndPersist((prev) => {
+        const target = prev.conversations.find((c) => c.id === conversationId);
+        if (!target || !target.unreadCount || target.unreadCount <= 0) return prev;
+        return {
+          ...prev,
+          conversations: prev.conversations.map((c) =>
+            c.id === conversationId ? { ...c, unreadCount: 0 } : c
+          )
+        };
+      });
+    },
+    [updateChatStoreAndPersist]
+  );
+
   const removeConversations = (params: RemoveConversationsParams) => {
+    const matchingConvs = latestRef.current.chatStore.conversations.filter(
+      (c) =>
+        c?.partner?.id === params.partnerId &&
+        (params.reason !== 'left' || !params.eventId || c.eventId === params.eventId)
+    );
+    archiveConversationsList(
+      matchingConvs,
+      latestRef.current.chatStore.chatMessages,
+      latestRef.current.effectiveNowMs
+    );
+
+    const affectedEventIds = new Set<string>();
+    if (params.eventId) affectedEventIds.add(params.eventId);
+    for (const c of matchingConvs) {
+      affectedEventIds.add(c.eventId);
+      if (partnerConfirmTimersRef.current[c.id]) {
+        window.clearTimeout(partnerConfirmTimersRef.current[c.id]);
+        delete partnerConfirmTimersRef.current[c.id];
+      }
+    }
+
+    // Quietly cancel any active initial/replacement searches for affected events (no notifications)
+    const eventIdsToCancel =
+      params.reason === 'left'
+        ? Array.from(affectedEventIds)
+        : Array.from(
+            new Set([
+              ...Array.from(affectedEventIds),
+              ...Object.keys(initialMatchTimersRef.current),
+              ...Object.keys(replacementTimersRef.current)
+            ])
+          );
+
+    for (const evId of eventIdsToCancel) {
+      if (initialMatchTimersRef.current[evId]) {
+        window.clearTimeout(initialMatchTimersRef.current[evId]);
+        delete initialMatchTimersRef.current[evId];
+      }
+      if (replacementTimersRef.current[evId]) {
+        window.clearTimeout(replacementTimersRef.current[evId]);
+        delete replacementTimersRef.current[evId];
+      }
+    }
+    if (eventIdsToCancel.length > 0) {
+      setSearchingReplacementEventIds((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const evId of eventIdsToCancel) {
+          if (next[evId]) {
+            delete next[evId];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }
+
+    if (affectedEventIds.size > 0) {
+      setEndedPairingsByEvent((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const evId of affectedEventIds) {
+          const list = next[evId] || [];
+          if (!list.includes(params.partnerId)) {
+            next[evId] = [...list, params.partnerId];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }
+
     updateChatStoreAndPersist((prev) => applyRemoveConversations(prev, params));
+  };
+
+  const confirmPairing = (conversationId: string) => {
+    const target = chatStore.conversations.find((c) => c.id === conversationId);
+    if (!target) return;
+
+    updateChatStoreAndPersist((prev) => ({
+      ...prev,
+      conversations: prev.conversations.map((c) =>
+        c.id === conversationId ? { ...c, userConfirmed: true } : c
+      )
+    }));
+
+    // If partner had already confirmed or once simulated partner confirmation arrives
+    if (partnerConfirmTimersRef.current[conversationId]) {
+      window.clearTimeout(partnerConfirmTimersRef.current[conversationId]);
+    }
+
+    const delayMs = target.partnerConfirmed ? 50 : BUDDY_POLICY.simulatedPartnerConfirmDelayMs;
+    partnerConfirmTimersRef.current[conversationId] = window.setTimeout(() => {
+      delete partnerConfirmTimersRef.current[conversationId];
+      const latest = latestRef.current;
+      const liveConv = latest.chatStore.conversations.find((c) => c.id === conversationId);
+      if (!liveConv || !liveConv.userConfirmed) return;
+
+      const confirmedAtIso = new Date(latest.effectiveNowMs).toISOString();
+      const systemMsg: ChatMessage = {
+        id: `m_confirmed_${Date.now()}`,
+        conversationId,
+        senderId: 'system',
+        text: "You're both confirmed to attend together!",
+        timestamp: 'Just now'
+      };
+
+      updateChatStoreAndPersist((prev) => {
+        if (!prev.conversations.some((c) => c.id === conversationId)) return prev;
+        return {
+          ...prev,
+          conversations: prev.conversations.map((c) =>
+            c.id === conversationId
+              ? {
+                  ...c,
+                  pairingStatus: 'confirmed',
+                  userConfirmed: true,
+                  partnerConfirmed: true,
+                  confirmedAt: confirmedAtIso
+                }
+              : c
+          ),
+          chatMessages: {
+            ...prev.chatMessages,
+            [conversationId]: [
+              ...(Array.isArray(prev.chatMessages[conversationId])
+                ? prev.chatMessages[conversationId]
+                : []),
+              systemMsg
+            ]
+          }
+        };
+      });
+
+      emitBuddyNotification({
+        kind: 'mutual_confirmation',
+        eventId: liveConv.eventId,
+        eventTitle: liveConv.eventTitle,
+        conversationId,
+        partnerId: liveConv.partner?.id
+      });
+    }, delayMs);
   };
 
   const toggleStayConnected = (conversationId: string) => {
@@ -1280,7 +2084,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
       conversations: prev.conversations.map((c) =>
         c.id === conversationId
-          ? { ...c, stayConnectedUser: !c.stayConnectedUser }
+          ? { ...c, stayConnectedUser: true }
           : c
       )
     }));
@@ -1309,13 +2113,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const sendMessage = (conversationId: string, text: string) => {
-    const trimmed = text.trim();
-    if (!user || !trimmed) return;
+    const trimmed = typeof text === 'string' ? text.trim() : '';
+    if (!user || !trimmed || !conversationId) return;
 
-    const conv = conversations.find((c) => c.id === conversationId);
+    const conv = conversations.find((c) => c && c.id === conversationId);
+    const partnerId = conv?.partner?.id;
     if (
       !conv ||
-      isPartnerBlockedOrReported(conv.partner.id, removedChats, blockedUserIds)
+      !partnerId ||
+      isPartnerBlockedOrReported(partnerId, removedChats, blockedUserIds)
     ) {
       return;
     }
@@ -1328,9 +2134,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
-    const priorMsgs = chatMessages[conversationId] || [];
+    const rawPriorMsgs = chatMessages?.[conversationId];
+    const priorMsgs = Array.isArray(rawPriorMsgs) ? rawPriorMsgs : [];
     const historyPayload = [...priorMsgs, newMsg]
-      .filter((m) => m.senderId !== 'system')
+      .filter((m) => m && typeof m.text === 'string' && m.senderId !== 'system')
       .slice(-16)
       .map((m) => ({
         role: m.senderId === user.id ? ('user' as const) : ('partner' as const),
@@ -1339,11 +2146,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     updateChatStoreAndPersist((prev) => {
       if (!prev.conversations.some((c) => c.id === conversationId)) return prev;
+      const existingMsgs = Array.isArray(prev.chatMessages?.[conversationId])
+        ? prev.chatMessages[conversationId]
+        : [];
       return {
         ...prev,
         chatMessages: {
           ...prev.chatMessages,
-          [conversationId]: [...(prev.chatMessages[conversationId] || []), newMsg]
+          [conversationId]: [...existingMsgs, newMsg]
         },
         conversations: prev.conversations.map((c) =>
           c.id === conversationId
@@ -1364,7 +2174,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     setTypingConversationIds((prev) => ({ ...prev, [conversationId]: true }));
 
-    const partnerProfile = SAMPLE_ATTENDEES[conv.partner.id] || conv.partner;
+    const partnerProfile = SAMPLE_ATTENDEES[partnerId] || conv.partner;
     const isEnded = !upcomingEvents.some((e) => e.id === conv.eventId);
 
     void (async () => {
@@ -1376,24 +2186,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             latestMessage: trimmed,
             history: historyPayload,
             partner: {
-              name: partnerProfile.name,
-              faculty: partnerProfile.faculty,
-              program: partnerProfile.program,
-              year: partnerProfile.year,
-              bio: partnerProfile.bio,
+              name: partnerProfile?.name || 'Waterloo Buddy',
+              faculty: partnerProfile?.faculty,
+              program: partnerProfile?.program,
+              year: partnerProfile?.year,
+              bio: partnerProfile?.bio,
               socialBattery:
-                partnerProfile.eventSocialBatteries?.[conv.eventId] ||
-                partnerProfile.defaultSocialBattery ||
+                partnerProfile?.eventSocialBatteries?.[conv.eventId] ||
+                partnerProfile?.defaultSocialBattery ||
                 conv.socialBattery
             },
             user: {
-              name: formatPublicName(user.name),
+              name: formatPublicName(user.name) || 'Alex',
               faculty: user.faculty,
               program: user.program,
               year: user.year
             },
             event: {
-              title: conv.eventTitle,
+              title: conv.eventTitle || 'Campus Event',
               location: conv.eventLocation,
               date: conv.eventDate,
               isEnded
@@ -1403,39 +2213,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const data = (await res.json().catch(() => ({}))) as {
           success?: boolean;
-          reply?: string;
-          error?: string;
+          reply?: unknown;
+          error?: unknown;
         };
 
         if (chatReplySeqRef.current[conversationId] !== seq) return;
 
         setTypingConversationIds((prev) => ({ ...prev, [conversationId]: false }));
 
-        if (!res.ok || !data.success || !data.reply) {
+        const replyText = typeof data.reply === 'string' ? data.reply.trim() : '';
+        if (!res.ok || !data.success || !replyText) {
+          const errMsg =
+            typeof data.error === 'string' && data.error.trim()
+              ? data.error
+              : 'Could not get a reply right now. Please try again.';
           setChatErrors((prev) => ({
             ...prev,
-            [conversationId]:
-              data.error || 'Could not get a reply right now. Please try again.'
+            [conversationId]: errMsg
           }));
           return;
         }
 
-        const replyText = data.reply.trim();
         const replyMsg: ChatMessage = {
           id: `m_rep_${Date.now()}`,
           conversationId,
-          senderId: conv.partner.id,
+          senderId: partnerId,
           text: replyText,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
 
         updateChatStoreAndPersist((prev) => {
           if (!prev.conversations.some((c) => c.id === conversationId)) return prev;
+          const existingMsgs = Array.isArray(prev.chatMessages?.[conversationId])
+            ? prev.chatMessages[conversationId]
+            : [];
           return {
             ...prev,
             chatMessages: {
               ...prev.chatMessages,
-              [conversationId]: [...(prev.chatMessages[conversationId] || []), replyMsg]
+              [conversationId]: [...existingMsgs, replyMsg]
             },
             conversations: prev.conversations.map((c) =>
               c.id === conversationId
@@ -1700,6 +2516,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const resetDemoData = () => {
+    Object.values(initialMatchTimersRef.current).forEach((t) => window.clearTimeout(t));
+    initialMatchTimersRef.current = {};
+    Object.values(replacementTimersRef.current).forEach((t) => window.clearTimeout(t));
+    replacementTimersRef.current = {};
+    Object.values(partnerConfirmTimersRef.current).forEach((t) => window.clearTimeout(t));
+    partnerConfirmTimersRef.current = {};
+    writeDemoClockMs(null);
+    setDemoClockMs(null);
+
     try {
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(SAVED_FILTERS_STORAGE_KEY);
@@ -1712,7 +2537,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         'wathive_app_state_v12',
         'wathive_app_state_v13',
         'wathive_app_state_v14',
-        'wathive_app_state_v15'
+        'wathive_app_state_v15',
+        'wathive_app_state_v16'
       ].forEach((k) => localStorage.removeItem(k));
     } catch {
       // ignore storage errors
@@ -1728,6 +2554,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setEventBuddySettings({});
     setEventSocialBatteryMap({});
     setSavedFilters([]);
+    setEventAttendeesMap(INITIAL_EVENT_ATTENDEES);
     setChatStore(
       sanitizeChatSnapshot({
         conversations: INITIAL_CONVERSATIONS,
@@ -1741,9 +2568,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setReportedEventIds([]);
     setReportsList([]);
     setDeclinedHistory([]);
-    setDailyBuddyRequestsCount(1);
+    setDailyBuddyRequestsCount(0);
     setNotificationSettings(DEFAULT_NOTIFICATION_SETTINGS);
     setNotifications(INITIAL_NOTIFICATIONS);
+    setUsedNotificationDedupeKeys([]);
+    setPushDailyCounter(null);
+    setBrowserAlertsEnabled(false);
+    setAttendedEventSnapshots({});
+    setBuddyOptInHistory({});
+    setPairingEventHistory({});
+    setEndedPairingsByEvent({});
+    setArchivedConversations([]);
+    setPartnerSimulationLog([]);
+    setSearchingReplacementEventIds({});
+    setEventSurveys({});
+    setSurveyDismissedEventIds([]);
     setAggregationSources(INITIAL_AGGREGATION_SOURCES);
     setDuplicateResults(INITIAL_DUPLICATES);
     setSyncReports([INITIAL_SYNC_REPORT]);
@@ -1838,7 +2677,674 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setNotifications((prev) => [newNotif, ...prev]);
   };
 
-  const unreadNotificationsCount = notifications.filter((n) => !n.read).length;
+  const toggleBrowserAlerts = async (
+    enabled: boolean
+  ): Promise<{ permission: NotificationPermission | 'unsupported' }> => {
+    if (!enabled) {
+      setBrowserAlertsEnabled(false);
+      return { permission: getBrowserNotificationPermission() };
+    }
+    const perm = await requestBrowserNotificationPermission();
+    setBrowserAlertPermission(perm);
+    if (perm === 'granted') {
+      setBrowserAlertsEnabled(true);
+    } else {
+      setBrowserAlertsEnabled(false);
+    }
+    return { permission: perm };
+  };
+
+  const submitPostEventSurvey = (submission: BuddySurveySubmission) => {
+    setEventSurveys((prev) => ({
+      ...prev,
+      [submission.eventId]: submission
+    }));
+  };
+
+  const dismissSurveyOffer = (eventId: string) => {
+    setSurveyDismissedEventIds((prev) =>
+      prev.includes(eventId) ? prev : [...prev, eventId]
+    );
+  };
+
+  const createProvisionalMatchForEvent = React.useCallback(
+    (
+      ev: EventItem,
+      kind: 'provisional_match' | 'replacement_found',
+      excludePartnerIds: string[] = []
+    ): Conversation | null => {
+      const latest = latestRef.current;
+      const seededSeekers = getSeedBuddySeekers(ev.id, {
+        pool: Object.values(SAMPLE_ATTENDEES),
+        isPast: isEventPast(ev, new Date(latest.effectiveNowMs)),
+        isResearchStudy: ev.isResearchStudy,
+        status: ev.status,
+        signedInUserId: latest.user?.id,
+        blockedUserIds: latest.chatStore.blockedUserIds,
+        reportedUserIds: latest.reportedUserIds,
+        removedChats: latest.chatStore.removedChats,
+        activePairingPartnerIds: latest.chatStore.conversations
+          .filter((c) => c.eventId === ev.id && Boolean(c.partner?.id))
+          .map((c) => c.partner.id),
+        endedPartnerIds: [
+          ...(latest.endedPairingsByEvent[ev.id] || []),
+          ...excludePartnerIds
+        ]
+      });
+
+      const candidate = findReplacementCandidate({
+        eventId: ev.id,
+        eventTitle: ev.title,
+        attendeeIds: seededSeekers.map((s) => s.id),
+        attendeesById: SAMPLE_ATTENDEES,
+        user: latest.user,
+        conversations: latest.chatStore.conversations,
+        removedChats: latest.chatStore.removedChats,
+        blockedUserIds: latest.chatStore.blockedUserIds,
+        reportedUserIds: latest.reportedUserIds,
+        excludePartnerIds: [
+          ...(latest.endedPairingsByEvent[ev.id] || []),
+          ...excludePartnerIds
+        ],
+        userEventBattery: latest.eventSocialBattery[ev.id]
+      });
+
+      if (!candidate) return null;
+
+      const { attendee, compatibility } = candidate;
+      const convId = getMatchConversationId(ev.id, attendee.id);
+      const userFirst = latest.user ? getFirstName(latest.user.name) : 'there';
+      const greeting = `Hey ${userFirst}! Looks like we matched for ${ev.title}. Want to head over together?`;
+
+      const newConv: Conversation = {
+        id: convId,
+        eventId: ev.id,
+        eventTitle: ev.title,
+        eventDate: ev.date,
+        eventLocation: ev.location,
+        partner: attendee,
+        lastMessage: greeting,
+        lastMessageTime: 'Just now',
+        unreadCount: 1,
+        pairingStatus: 'provisional',
+        userConfirmed: false,
+        partnerConfirmed: false,
+        isReported: false,
+        stayConnectedUser: false,
+        stayConnectedPartner: false,
+        isChatClosedPostEvent: false,
+        icebreakerPill: compatibility.icebreakerPill,
+        icebreakerBanner: compatibility.icebreakerBanner,
+        icebreakerQuestion: compatibility.icebreakerQuestion,
+        socialBattery: latest.eventSocialBattery[ev.id] || attendee.defaultSocialBattery
+      };
+
+      const sysMsg: ChatMessage = {
+        id: `m_sys_match_${convId}`,
+        conversationId: convId,
+        senderId: 'system',
+        text: "You've been matched. Say hello. Nothing is final until you both confirm.",
+        timestamp: 'Just now'
+      };
+
+      const introMsg: ChatMessage = {
+        id: `m_match_${Date.now()}`,
+        conversationId: convId,
+        senderId: attendee.id,
+        text: greeting,
+        timestamp: 'Just now'
+      };
+
+      const alreadyExistsInLatest = latest.chatStore.conversations.some(
+        (c) => c.id === convId || c.eventId === ev.id
+      );
+      if (alreadyExistsInLatest) return null;
+
+      // Update chatStore ref synchronously before emitting notification so checks & retries stay atomic
+      latestRef.current.chatStore = {
+        ...latest.chatStore,
+        conversations: [newConv, ...latest.chatStore.conversations],
+        chatMessages: {
+          ...latest.chatStore.chatMessages,
+          [convId]: [sysMsg, introMsg]
+        }
+      };
+
+      updateChatStoreAndPersist((prev) => {
+        const alreadyExists = prev.conversations.some(
+          (c) => c.id === convId || c.eventId === ev.id
+        );
+        if (alreadyExists) return prev;
+        return {
+          ...prev,
+          conversations: [newConv, ...prev.conversations],
+          chatMessages: {
+            ...prev.chatMessages,
+            [convId]: [sysMsg, introMsg]
+          }
+        };
+      });
+
+      setPairingEventHistory((prev) => ({ ...prev, [ev.id]: true }));
+      latestRef.current.attendedEventSnapshots = {
+        ...latestRef.current.attendedEventSnapshots,
+        [ev.id]: ev
+      };
+      setAttendedEventSnapshots((prev) => ({ ...prev, [ev.id]: ev }));
+      setSearchingReplacementEventIds((prev) => {
+        if (!prev[ev.id]) return prev;
+        const next = { ...prev };
+        delete next[ev.id];
+        return next;
+      });
+
+      emitBuddyNotification({
+        kind,
+        eventId: ev.id,
+        eventTitle: ev.title,
+        conversationId: convId,
+        partnerId: attendee.id
+      });
+
+      return newConv;
+    },
+    [emitBuddyNotification, updateChatStoreAndPersist]
+  );
+
+  const scheduleReplacementSearch = React.useCallback(
+    (eventId: string, _eventTitle: string) => {
+      if (replacementTimersRef.current[eventId]) {
+        window.clearTimeout(replacementTimersRef.current[eventId]);
+      }
+
+      setSearchingReplacementEventIds((prev) => ({ ...prev, [eventId]: true }));
+
+      replacementTimersRef.current[eventId] = window.setTimeout(() => {
+        delete replacementTimersRef.current[eventId];
+        setSearchingReplacementEventIds((prev) => {
+          if (!prev[eventId]) return prev;
+          const next = { ...prev };
+          delete next[eventId];
+          return next;
+        });
+
+        const latest = latestRef.current;
+        if (!latest.user || !latest.user.isVerifiedUWStudent) return;
+        if (!latest.attendingEventIds.includes(eventId)) return;
+        if (!latest.attendeeVisibility[eventId]) return;
+        if (latest.chatStore.conversations.some((c) => c.eventId === eventId)) return;
+
+        const ev =
+          latest.events.find((e) => e.id === eventId) ||
+          latest.attendedEventSnapshots[eventId];
+        if (!ev || ev.isResearchStudy || ev.status === 'cancelled') return;
+        if (isEventPast(ev, new Date(latest.effectiveNowMs))) return;
+
+        const excluded = latest.endedPairingsByEvent[eventId] || [];
+        createProvisionalMatchForEvent(ev, 'replacement_found', excluded);
+      }, BUDDY_POLICY.replacementSearchDelayMs);
+    },
+    [createProvisionalMatchForEvent]
+  );
+
+  const demoGetMatched = (): { ok: boolean; message: string } => {
+    const candidates = upcomingEvents.filter(
+      (e) => !e.isResearchStudy && e.status === 'published'
+    );
+    if (candidates.length === 0) {
+      return { ok: false, message: 'No upcoming events available.' };
+    }
+
+    const activeEventIds = new Set(chatStore.conversations.map((c) => c.eventId));
+    const targetEvent =
+      candidates.find(
+        (e) => attendingEventIds.includes(e.id) && attendeeVisibility[e.id] && !activeEventIds.has(e.id)
+      ) ||
+      candidates.find((e) => attendingEventIds.includes(e.id) && !activeEventIds.has(e.id)) ||
+      candidates.find((e) => !activeEventIds.has(e.id)) ||
+      candidates[0];
+
+    // Ensure attending + buddy matching opted-in synchronously in ref + state
+    if (!attendingEventIds.includes(targetEvent.id)) {
+      latestRef.current.attendingEventIds = [...latestRef.current.attendingEventIds, targetEvent.id];
+      setAttendingEventIds((prev) =>
+        prev.includes(targetEvent.id) ? prev : [...prev, targetEvent.id]
+      );
+    }
+    if (!attendeeVisibility[targetEvent.id]) {
+      latestRef.current.attendeeVisibility = {
+        ...latestRef.current.attendeeVisibility,
+        [targetEvent.id]: true
+      };
+      setAttendeeVisibilityMap((prev) => ({ ...prev, [targetEvent.id]: true }));
+      const startMs = getEventStartUtcMs(targetEvent);
+      const beforeStart = Number.isFinite(startMs) ? effectiveNowMs < startMs : true;
+      const optRec: BuddyOptInRecord = {
+        optedInAtMs: effectiveNowMs,
+        optedInBeforeStart: beforeStart,
+        active: true
+      };
+      latestRef.current.buddyOptInHistory = {
+        ...latestRef.current.buddyOptInHistory,
+        [targetEvent.id]: optRec
+      };
+      setBuddyOptInHistory((prev) => ({ ...prev, [targetEvent.id]: optRec }));
+    }
+
+    const excluded = endedPairingsByEvent[targetEvent.id] || [];
+    const created = createProvisionalMatchForEvent(targetEvent, 'provisional_match', excluded);
+    if (!created) {
+      return { ok: false, message: 'No eligible buddies available right now.' };
+    }
+    return { ok: true, message: `Matched for ${targetEvent.title}` };
+  };
+
+  const simulatePartnerTermination = (
+    kind: 'pairing_ended' | 'buddy_cancelled'
+  ): { ok: boolean; message: string } => {
+    const targetConv =
+      chatStore.conversations.find((c) =>
+        upcomingEvents.some((e) => e.id === c.eventId)
+      ) || chatStore.conversations[0];
+
+    if (!targetConv) {
+      return { ok: false, message: 'No active buddy chat yet.' };
+    }
+
+    if (partnerConfirmTimersRef.current[targetConv.id]) {
+      window.clearTimeout(partnerConfirmTimersRef.current[targetConv.id]);
+      delete partnerConfirmTimersRef.current[targetConv.id];
+    }
+
+    const prevExcluded = latestRef.current.endedPairingsByEvent[targetConv.eventId] || [];
+    const targetPartnerId = targetConv.partner?.id;
+    const nextExcluded =
+      targetPartnerId && !prevExcluded.includes(targetPartnerId)
+        ? [...prevExcluded, targetPartnerId]
+        : prevExcluded;
+    latestRef.current.endedPairingsByEvent = {
+      ...latestRef.current.endedPairingsByEvent,
+      [targetConv.eventId]: nextExcluded
+    };
+    setEndedPairingsByEvent((prev) => ({
+      ...prev,
+      [targetConv.eventId]: nextExcluded
+    }));
+
+    // Ensure student remains attending & opted-in so replacement search proceeds cleanly
+    if (!attendingEventIds.includes(targetConv.eventId)) {
+      latestRef.current.attendingEventIds = [
+        ...latestRef.current.attendingEventIds,
+        targetConv.eventId
+      ];
+      setAttendingEventIds((prev) =>
+        prev.includes(targetConv.eventId) ? prev : [...prev, targetConv.eventId]
+      );
+    }
+    if (!attendeeVisibility[targetConv.eventId]) {
+      latestRef.current.attendeeVisibility = {
+        ...latestRef.current.attendeeVisibility,
+        [targetConv.eventId]: true
+      };
+      setAttendeeVisibilityMap((prev) => ({ ...prev, [targetConv.eventId]: true }));
+    }
+
+    archiveConversationsList(
+      [targetConv],
+      latestRef.current.chatStore.chatMessages,
+      latestRef.current.effectiveNowMs
+    );
+
+    updateChatStoreAndPersist((prev) => {
+      const nextMsgs: Record<string, ChatMessage[]> = {};
+      for (const [cid, msgs] of Object.entries(prev.chatMessages)) {
+        if (cid !== targetConv.id) nextMsgs[cid] = msgs;
+      }
+      return {
+        ...prev,
+        conversations: prev.conversations.filter((c) => c.id !== targetConv.id),
+        chatMessages: nextMsgs,
+        connectionRequests: prev.connectionRequests.map((r) =>
+          r.eventId === targetConv.eventId &&
+          (r.senderId === targetConv.partner.id || r.recipientId === targetConv.partner.id) &&
+          r.status === 'pending'
+            ? { ...r, status: 'withdrawn' as const }
+            : r
+        )
+      };
+    });
+
+    // Update chatStore ref synchronously so emitBuddyNotification and replacement see removed chat
+    latestRef.current.chatStore = {
+      ...latestRef.current.chatStore,
+      conversations: latestRef.current.chatStore.conversations.filter(
+        (c) => c.id !== targetConv.id
+      )
+    };
+
+    emitBuddyNotification({
+      kind,
+      eventId: targetConv.eventId,
+      eventTitle: targetConv.eventTitle,
+      dedupeSubjectId: targetConv.id
+    });
+
+    scheduleReplacementSearch(targetConv.eventId, targetConv.eventTitle);
+
+    return {
+      ok: true,
+      message:
+        kind === 'pairing_ended'
+          ? 'Pairing ended. Looking for a replacement (5s)...'
+          : 'Buddy cancelled. Looking for a replacement (5s)...'
+    };
+  };
+
+  const executeManageOutcome = (
+    conversationId: string,
+    action: 'find_another' | 'no_longer_need' | 'unable_to_attend'
+  ): { ok: boolean; message: string } => {
+    const targetConv = latestRef.current.chatStore.conversations.find(
+      (c) => c.id === conversationId
+    );
+    if (!targetConv) {
+      return { ok: false, message: 'Conversation not found.' };
+    }
+
+    const plan = getManageBuddyOutcomePlan(action);
+    const nowAtAction = latestRef.current.effectiveNowMs;
+
+    if (partnerConfirmTimersRef.current[targetConv.id]) {
+      window.clearTimeout(partnerConfirmTimersRef.current[targetConv.id]);
+      delete partnerConfirmTimersRef.current[targetConv.id];
+    }
+    if (initialMatchTimersRef.current[targetConv.eventId]) {
+      window.clearTimeout(initialMatchTimersRef.current[targetConv.eventId]);
+      delete initialMatchTimersRef.current[targetConv.eventId];
+    }
+    if (replacementTimersRef.current[targetConv.eventId]) {
+      window.clearTimeout(replacementTimersRef.current[targetConv.eventId]);
+      delete replacementTimersRef.current[targetConv.eventId];
+    }
+
+    archiveConversationsList(
+      [targetConv],
+      latestRef.current.chatStore.chatMessages,
+      nowAtAction
+    );
+
+    const prevExcluded = latestRef.current.endedPairingsByEvent[targetConv.eventId] || [];
+    const targetPartnerId = targetConv.partner?.id;
+    const nextExcluded =
+      targetPartnerId && !prevExcluded.includes(targetPartnerId)
+        ? [...prevExcluded, targetPartnerId]
+        : prevExcluded;
+    latestRef.current.endedPairingsByEvent = {
+      ...latestRef.current.endedPairingsByEvent,
+      [targetConv.eventId]: nextExcluded
+    };
+    setEndedPairingsByEvent((prev) => ({
+      ...prev,
+      [targetConv.eventId]: nextExcluded
+    }));
+
+    // Update chatStore ref synchronously so replacement checks see removed conversation
+    const nextConvsSync = latestRef.current.chatStore.conversations.filter(
+      (c) => c.id !== targetConv.id
+    );
+    const nextMsgsSync: Record<string, ChatMessage[]> = {};
+    for (const [cid, msgs] of Object.entries(latestRef.current.chatStore.chatMessages)) {
+      if (cid !== targetConv.id) nextMsgsSync[cid] = msgs;
+    }
+    latestRef.current.chatStore = {
+      ...latestRef.current.chatStore,
+      conversations: nextConvsSync,
+      chatMessages: nextMsgsSync
+    };
+
+    updateChatStoreAndPersist((prev) => {
+      const nextMsgs: Record<string, ChatMessage[]> = {};
+      for (const [cid, msgs] of Object.entries(prev.chatMessages)) {
+        if (cid !== targetConv.id) nextMsgs[cid] = msgs;
+      }
+      return {
+        ...prev,
+        conversations: prev.conversations.filter((c) => c.id !== targetConv.id),
+        chatMessages: nextMsgs,
+        connectionRequests: prev.connectionRequests.map((r) =>
+          r.eventId === targetConv.eventId &&
+          (r.senderId === targetConv.partner.id || r.recipientId === targetConv.partner.id) &&
+          r.status === 'pending'
+            ? { ...r, status: 'withdrawn' as const }
+            : r
+        )
+      };
+    });
+
+    if (plan.keepRsvp) {
+      if (!latestRef.current.attendingEventIds.includes(targetConv.eventId)) {
+        latestRef.current.attendingEventIds = [
+          ...latestRef.current.attendingEventIds,
+          targetConv.eventId
+        ];
+        setAttendingEventIds((prev) =>
+          prev.includes(targetConv.eventId) ? prev : [...prev, targetConv.eventId]
+        );
+      }
+    } else {
+      latestRef.current.attendingEventIds = latestRef.current.attendingEventIds.filter(
+        (id) => id !== targetConv.eventId
+      );
+      setAttendingEventIds((prev) => prev.filter((id) => id !== targetConv.eventId));
+    }
+
+    if (plan.keepBuddyMatchingActive) {
+      latestRef.current.attendeeVisibility = {
+        ...latestRef.current.attendeeVisibility,
+        [targetConv.eventId]: true
+      };
+      setAttendeeVisibilityMap((prev) => ({ ...prev, [targetConv.eventId]: true }));
+    } else {
+      const nextVis = { ...latestRef.current.attendeeVisibility };
+      delete nextVis[targetConv.eventId];
+      latestRef.current.attendeeVisibility = nextVis;
+      setAttendeeVisibilityMap((prev) => {
+        const next = { ...prev };
+        delete next[targetConv.eventId];
+        return next;
+      });
+      if (latestRef.current.buddyOptInHistory[targetConv.eventId]) {
+        latestRef.current.buddyOptInHistory = {
+          ...latestRef.current.buddyOptInHistory,
+          [targetConv.eventId]: {
+            ...latestRef.current.buddyOptInHistory[targetConv.eventId],
+            active: false
+          }
+        };
+      }
+      setBuddyOptInHistory((prev) =>
+        prev[targetConv.eventId]
+          ? { ...prev, [targetConv.eventId]: { ...prev[targetConv.eventId], active: false } }
+          : prev
+      );
+      setSearchingReplacementEventIds((prev) => {
+        if (!prev[targetConv.eventId]) return prev;
+        const next = { ...prev };
+        delete next[targetConv.eventId];
+        return next;
+      });
+    }
+
+    // Record simulated partner-side notice (never pushed into acting student's notifications bell)
+    const partnerNotice: PartnerSimulationNotice = {
+      id: `sim_partner_${Date.now()}`,
+      kind: plan.partnerNoticeKind,
+      eventId: targetConv.eventId,
+      eventTitle: targetConv.eventTitle,
+      replacementSearchStarted: plan.triggerPartnerReplacementSearch,
+      createdAtMs: nowAtAction
+    };
+    setPartnerSimulationLog((prev) => [partnerNotice, ...prev].slice(0, 20));
+
+    if (plan.triggerUserReplacementSearch) {
+      scheduleReplacementSearch(targetConv.eventId, targetConv.eventTitle);
+    }
+
+    return { ok: true, message: plan.userToast };
+  };
+
+  const rematchBuddyForEvent = (conversationId: string) =>
+    executeManageOutcome(conversationId, 'find_another');
+
+  const leaveBuddyMatchingFromChat = (conversationId: string) =>
+    executeManageOutcome(conversationId, 'no_longer_need');
+
+  const cancelRsvpFromChat = (conversationId: string) =>
+    executeManageOutcome(conversationId, 'unable_to_attend');
+
+  const demoSimulatePairingEnded = () => simulatePartnerTermination('pairing_ended');
+  const demoSimulateBuddyCancelled = () => simulatePartnerTermination('buddy_cancelled');
+
+  const demoAdvanceWithin24Hours = (): { ok: boolean; message: string } => {
+    const allKnown = [
+      ...events,
+      ...Object.values(attendedEventSnapshots).filter(
+        (snap) => !events.some((e) => e.id === snap.id)
+      )
+    ];
+    const confirmedConvEventIds = new Set(
+      chatStore.conversations
+        .filter((c) => c.pairingStatus === 'confirmed' || (c.userConfirmed && c.partnerConfirmed))
+        .map((c) => c.eventId)
+    );
+    const activeConvEventIds = new Set(chatStore.conversations.map((c) => c.eventId));
+
+    const targetEvent =
+      allKnown.find(
+        (e) => confirmedConvEventIds.has(e.id) && !isEventPast(e, new Date(effectiveNowMs))
+      ) ||
+      allKnown.find(
+        (e) => activeConvEventIds.has(e.id) && !isEventPast(e, new Date(effectiveNowMs))
+      ) ||
+      allKnown.find(
+        (e) => attendingEventIds.includes(e.id) && !isEventPast(e, new Date(effectiveNowMs))
+      ) ||
+      upcomingEvents[0];
+
+    if (!targetEvent) {
+      return { ok: false, message: 'No upcoming event found.' };
+    }
+
+    const startMs = getEventStartUtcMs(targetEvent);
+    if (!Number.isFinite(startMs)) {
+      return { ok: false, message: 'Invalid event start time.' };
+    }
+
+    setAttendedEventSnapshots((prev) => ({ ...prev, [targetEvent.id]: targetEvent }));
+    const nextClock = startMs - 2 * 60 * 60 * 1000;
+    writeDemoClockMs(nextClock);
+    setDemoClockMs(nextClock);
+    setTorontoNow(getTorontoNow(new Date(nextClock)));
+    return { ok: true, message: `Clock moved to 2h before ${targetEvent.title}` };
+  };
+
+  const demoAdvanceToEventStart = (): { ok: boolean; message: string } => {
+    const candidateIds = Array.from(
+      new Set([
+        ...attendingEventIds,
+        ...chatStore.conversations.map((c) => c.eventId),
+        ...savedEventIds
+      ])
+    );
+    const allKnown = [
+      ...events,
+      ...Object.values(attendedEventSnapshots).filter(
+        (snap) => !events.some((e) => e.id === snap.id)
+      )
+    ];
+
+    const targetEvent =
+      allKnown.find(
+        (e) =>
+          candidateIds.includes(e.id) &&
+          !isEventPast(e, new Date(effectiveNowMs)) &&
+          !chatStore.conversations.some((c) => c.eventId === e.id)
+      ) ||
+      allKnown.find(
+        (e) => candidateIds.includes(e.id) && !isEventPast(e, new Date(effectiveNowMs))
+      ) ||
+      upcomingEvents[0];
+
+    if (!targetEvent) {
+      return { ok: false, message: 'No upcoming student event found.' };
+    }
+
+    const startMs = getEventStartUtcMs(targetEvent);
+    if (!Number.isFinite(startMs)) {
+      return { ok: false, message: 'Invalid event start time.' };
+    }
+
+    setAttendedEventSnapshots((prev) => ({ ...prev, [targetEvent.id]: targetEvent }));
+    const nextClock = startMs + 60_000;
+    writeDemoClockMs(nextClock);
+    setDemoClockMs(nextClock);
+    setTorontoNow(getTorontoNow(new Date(nextClock)));
+    return { ok: true, message: `Clock moved to start of ${targetEvent.title}` };
+  };
+
+  const demoAdvanceToEventEnd = (): { ok: boolean; message: string } => {
+    const candidateIds = Array.from(
+      new Set([
+        ...chatStore.conversations.map((c) => c.eventId),
+        ...attendingEventIds,
+        ...savedEventIds
+      ])
+    );
+    const allKnown = [
+      ...events,
+      ...Object.values(attendedEventSnapshots).filter(
+        (snap) => !events.some((e) => e.id === snap.id)
+      )
+    ];
+
+    const targetEvent =
+      allKnown.find(
+        (e) => candidateIds.includes(e.id) && !isEventPast(e, new Date(effectiveNowMs))
+      ) ||
+      upcomingEvents[0] ||
+      allKnown.find((e) => candidateIds.includes(e.id));
+
+    if (!targetEvent) {
+      return { ok: false, message: 'No student event found.' };
+    }
+
+    const endMs = getEventEndUtcMs(targetEvent);
+    if (!Number.isFinite(endMs)) {
+      return { ok: false, message: 'Invalid event end time.' };
+    }
+
+    setAttendedEventSnapshots((prev) => ({ ...prev, [targetEvent.id]: targetEvent }));
+    const nextClock = endMs + 60_000;
+    writeDemoClockMs(nextClock);
+    setDemoClockMs(nextClock);
+    setTorontoNow(getTorontoNow(new Date(nextClock)));
+    return { ok: true, message: `Clock moved to end of ${targetEvent.title}` };
+  };
+
+  const demoResetClock = () => {
+    writeDemoClockMs(null);
+    setDemoClockMs(null);
+    const realNow = Date.now();
+    setNowMs(realNow);
+    setTorontoNow(getTorontoNow(new Date(realNow)));
+  };
+
+  const visibleNotifications = React.useMemo(
+    () => notifications.filter((n) => isNotificationVisibleForSettings(n, notificationSettings)),
+    [notifications, notificationSettings]
+  );
+
+  const unreadNotificationsCount = visibleNotifications.filter((n) => !n.read).length;
 
   return (
     <AppContext.Provider
@@ -1920,7 +3426,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resolveDuplicate,
         moderateEvent,
         resolveReport,
-        addCustomDiscount
+        addCustomDiscount,
+
+        // Buddy notifications, pairing confirmation, post-event surveys & demo controls
+        effectiveNowMs,
+        demoClockMs,
+        attendedEventSnapshots,
+        buddyOptInHistory,
+        pairingEventHistory,
+        endedPairingsByEvent,
+        searchingReplacementEventIds,
+        eventSurveys,
+        surveyDismissedEventIds,
+        browserAlertsEnabled,
+        browserAlertPermission,
+        visibleNotifications,
+        getEventById,
+        markConversationRead,
+        confirmPairing,
+        rematchBuddyForEvent,
+        leaveBuddyMatchingFromChat,
+        cancelRsvpFromChat,
+        archivedConversations,
+        partnerSimulationLog,
+        toggleBrowserAlerts,
+        submitPostEventSurvey,
+        dismissSurveyOffer,
+        demoGetMatched,
+        demoSimulatePairingEnded,
+        demoSimulateBuddyCancelled,
+        demoAdvanceWithin24Hours,
+        demoAdvanceToEventStart,
+        demoAdvanceToEventEnd,
+        demoResetClock
       }}
     >
       {children}

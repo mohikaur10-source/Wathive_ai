@@ -8,6 +8,16 @@ import {
   isChatRemovedForPair,
   sanitizeChatSnapshot
 } from '../src/utils/chatRemoval.js';
+import {
+  createArchivedConversationRecord,
+  getBuddyCommonLines,
+  purgeExpiredArchivedConversations
+} from '../src/utils/pairingLifecycle.js';
+import { getConversationStarters } from '../src/utils/compatibilityEngine.js';
+import { evaluatePostEventChatAccess } from '../src/utils/postEventChat.js';
+import { getEventEndUtcMs } from '../src/utils/eventLifecycle.js';
+import { getFirstName } from '../src/utils/buddySeeding.js';
+import { formatModalEventDateTime } from '../src/utils/timeZone.js';
 import { AttendeeProfile, ConnectionRequest, Conversation } from '../src/types/index.js';
 
 const makePartner = (id: string, name: string): AttendeeProfile => ({
@@ -225,3 +235,104 @@ describe('Complete Chat Removal (Leave / Block / Report)', () => {
     assert.equal(isChatRemovedForPair('maya', 'e2', unblocked.removedChats, unblocked.blockedUserIds), false);
   });
 });
+
+describe('Chat Crash Resilience & Corrupt Storage Recovery', () => {
+  it('sanitizeChatSnapshot safely recovers from null entries, missing partner, and non-array chatMessages', () => {
+    const corrupt = {
+      conversations: [
+        null,
+        { id: 'bad_no_partner', eventId: 'e1' },
+        { id: 'bad_null_partner', eventId: 'e1', partner: null },
+        {
+          id: 'good_partial',
+          eventId: 'e2',
+          partner: { id: 'p_ok', name: undefined },
+          unreadCount: Number.NaN
+        }
+      ],
+      chatMessages: {
+        good_partial: [null, { id: 'm_ok', text: 'hey' }, { text: 'missing_id' }],
+        bad_non_array: { not: 'an_array' },
+        null_entry: null
+      },
+      connectionRequests: [null, { id: 'bad_req' }, makeReq('r_ok', 'e2', 'a', 'b', 'pending')],
+      removedChats: [null, { reason: 'left' }],
+      blockedUserIds: [null, 123, 'blocked_1']
+    } as unknown as ChatStateSnapshot;
+
+    const clean = sanitizeChatSnapshot(corrupt);
+    assert.equal(clean.conversations.length, 1);
+    assert.equal(clean.conversations[0].id, 'good_partial');
+    assert.equal(clean.conversations[0].partner.name, 'Waterloo Student');
+    assert.equal(clean.conversations[0].unreadCount, 0);
+    assert.equal(clean.conversations[0].eventTitle, 'Campus Event');
+    assert.equal(Array.isArray(clean.chatMessages['good_partial']), true);
+    assert.equal(clean.chatMessages['good_partial'].length, 1);
+    assert.equal(clean.chatMessages['good_partial'][0].text, 'hey');
+    assert.equal(clean.chatMessages['bad_non_array'], undefined);
+    assert.equal(clean.connectionRequests.length, 1);
+    assert.deepEqual(clean.blockedUserIds, ['blocked_1']);
+  });
+
+  it('archive helpers, common lines, starters, and date utilities never throw on invalid inputs', () => {
+    const arch = createArchivedConversationRecord({
+      conversation: {
+        id: 'c1',
+        eventId: 'e1',
+        eventTitle: undefined as unknown as string,
+        eventDate: undefined as unknown as string,
+        eventLocation: undefined as unknown as string
+      },
+      messages: null as unknown as [],
+      closedAtMs: Number.NaN
+    });
+    assert.equal(Array.isArray(arch.messages), true);
+    assert.equal(Number.isFinite(arch.closedAtMs), true);
+
+    const purged = purgeExpiredArchivedConversations([
+      null as unknown as typeof arch,
+      { id: 'bad', closedAtMs: Number.NaN } as unknown as typeof arch,
+      { ...arch, messages: undefined as unknown as [] }
+    ]);
+    assert.equal(purged.length, 1);
+    assert.deepEqual(purged[0].messages, []);
+
+    const lines = getBuddyCommonLines({
+      user: {
+        id: 'u1',
+        name: 123 as unknown as string,
+        personalityQuiz: {
+          completed: true,
+          preferenceBubbles: 'not-an-array' as unknown as []
+        } as never
+      } as never,
+      partner: {
+        id: 'p1',
+        name: null as unknown as string,
+        personalityQuiz: 'invalid-quiz' as never
+      } as never
+    });
+    assert.ok(lines.length >= 1);
+
+    const starters = getConversationStarters(
+      { completed: true, preferenceBubbles: 'bad' as unknown as [] } as never,
+      null as never,
+      null,
+      { id: 'p1', name: 42 as unknown as string, isVerifiedUWStudent: true } as never,
+      undefined,
+      'e1',
+      undefined,
+      false
+    );
+    assert.ok(starters.prompts.length >= 1);
+
+    assert.equal(getFirstName(null), 'Student');
+    assert.equal(getFirstName(123 as unknown as string), 'Student');
+    assert.equal(Number.isNaN(getEventEndUtcMs({ date: 999 as unknown as string })), true);
+    assert.equal(formatModalEventDateTime(undefined as unknown as string, undefined as unknown as string), '');
+
+    const evalRes = evaluatePostEventChatAccess(null, NaN, Date.now());
+    assert.equal(evalRes.isChatClosed, false);
+  });
+});
+

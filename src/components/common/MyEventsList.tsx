@@ -14,11 +14,12 @@ import { useApp } from '../../context/AppContext';
 import { downloadEventIcs } from '../../utils/calendar';
 import { getTorontoNow, formatWaterlooTimeRange } from '../../utils/timeZone';
 import { addDaysToIsoDate, formatIsoDatePretty, getCalendarWeekBounds } from '../../utils/dateRange';
+import { getFirstName } from '../../utils/buddySeeding';
 
 interface MyEventsListProps {
   events: EventItem[];
   onSelectEvent: (event: EventItem) => void;
-  onNavigateToMessages?: () => void;
+  onNavigateToMessages?: (subTab?: 'conversations' | 'requests', conversationId?: string) => void;
   onExportToast?: (msg: string) => void;
   /** Optional override for badge mode ('going' | 'saved' | 'auto') */
   badgeMode?: 'auto' | 'going' | 'saved';
@@ -31,9 +32,9 @@ export const MyEventsList: React.FC<MyEventsListProps> = ({
   onExportToast,
   badgeMode = 'auto'
 }) => {
-  const { attendingEventIds, conversations, getEventAttendees } = useApp();
+  const { attendingEventIds, conversations, getEventAttendees, effectiveNowMs } = useApp();
 
-  const todayStr = getTorontoNow().dateStr;
+  const todayStr = getTorontoNow(new Date(effectiveNowMs)).dateStr;
   const tomorrowStr = addDaysToIsoDate(todayStr, 1);
   const { sunday: weekSunday } = getCalendarWeekBounds(todayStr);
 
@@ -121,12 +122,12 @@ export const MyEventsList: React.FC<MyEventsListProps> = ({
                   {/* Right metadata & unobtrusive .ics export */}
                   <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                     {isGoing ? (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-accent text-accent-ink text-xs font-bold">
+                      <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-accent text-accent-ink text-xs font-bold">
                         <Check className="w-3 h-3 stroke-[2.8]" />
                         <span>Going</span>
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-surface-soft text-muted text-xs font-semibold">
+                      <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-surface-soft text-muted text-xs font-semibold">
                         <Bookmark className="w-3 h-3" />
                         <span>Saved</span>
                       </span>
@@ -135,15 +136,15 @@ export const MyEventsList: React.FC<MyEventsListProps> = ({
                     {conv && onNavigateToMessages ? (
                       <button
                         type="button"
-                        onClick={onNavigateToMessages}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-accent-soft text-accent-text text-xs font-semibold hover:bg-accent/25 transition-colors cursor-pointer"
+                        onClick={() => onNavigateToMessages('conversations', conv.id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent-soft text-accent-text text-xs font-semibold hover:bg-accent hover:text-accent-ink transition-colors cursor-pointer"
                         title="Open buddy chat in Buddy Buzz"
                       >
                         <MessageCircle className="w-3 h-3" />
-                        <span>{conv.partner.name}</span>
+                        <span>{getFirstName(conv.partner.name)}</span>
                       </button>
                     ) : !ev.isResearchStudy ? (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-canvas border border-line text-xs text-muted tabular-nums">
+                      <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-canvas border border-line text-xs text-muted tabular-nums">
                         <Users className="w-3 h-3" />
                         <span>{buddyCount}</span>
                       </span>
@@ -155,7 +156,7 @@ export const MyEventsList: React.FC<MyEventsListProps> = ({
                         downloadEventIcs(ev);
                         onExportToast?.(`Downloaded .ics for "${ev.title}"`);
                       }}
-                      className="px-2.5 py-1.5 rounded-xl border border-line bg-canvas hover:bg-surface-soft text-muted hover:text-ink text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                      className="px-3 py-1.5 rounded-full border border-line bg-canvas hover:bg-surface-soft text-muted hover:text-ink text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                       title="Export to calendar (.ics)"
                     >
                       <Download className="w-3.5 h-3.5" />

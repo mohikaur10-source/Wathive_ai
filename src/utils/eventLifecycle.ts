@@ -66,11 +66,13 @@ export function torontoWallClockToUtcMs(
   timeStr = '23:59:59',
   msOffset = 0
 ): number {
+  if (typeof dateStr !== 'string') return NaN;
   const cleanDate = dateStr.slice(0, 10);
   if (!DATE_RE.test(cleanDate)) return NaN;
 
+  const safeTimeStr = typeof timeStr === 'string' ? timeStr : '23:59:59';
   const [year, month, day] = cleanDate.split('-').map(Number);
-  const match = timeStr.match(TIME_RE);
+  const match = safeTimeStr.match(TIME_RE);
   const hour = match ? Math.min(23, Math.max(0, parseInt(match[1], 10))) : 23;
   const minute = match ? Math.min(59, Math.max(0, parseInt(match[2], 10))) : 59;
   const second = match && match[3] ? Math.min(59, Math.max(0, parseInt(match[3], 10))) : 0;
@@ -98,12 +100,14 @@ export function torontoWallClockToUtcMs(
  * Formats an exact UTC offset string ("-04:00" or "-05:00") for a Toronto wall-clock timestamp.
  */
 export function getTorontoOffsetStringForWallClock(dateStr: string, timeStr = '12:00:00'): string {
+  if (typeof dateStr !== 'string') return '-05:00';
   const cleanDate = dateStr.slice(0, 10);
-  const utcMs = torontoWallClockToUtcMs(cleanDate, timeStr);
+  const safeTimeStr = typeof timeStr === 'string' ? timeStr : '12:00:00';
+  const utcMs = torontoWallClockToUtcMs(cleanDate, safeTimeStr);
   if (!Number.isFinite(utcMs)) return '-05:00';
 
   const [year, month, day] = cleanDate.split('-').map(Number);
-  const match = timeStr.match(TIME_RE);
+  const match = safeTimeStr.match(TIME_RE);
   const hour = match ? parseInt(match[1], 10) : 12;
   const minute = match ? parseInt(match[2], 10) : 0;
   const second = match && match[3] ? parseInt(match[3], 10) : 0;
@@ -118,26 +122,52 @@ export function getTorontoOffsetStringForWallClock(dateStr: string, timeStr = '1
 }
 
 /**
+ * Computes the effective start instant (UTC epoch ms) of an event in America/Toronto.
+ */
+export function getEventStartUtcMs(event: EventLifecycleShape): number {
+  if (!event || typeof event !== 'object') return NaN;
+  const candidateDate =
+    typeof event.date === 'string' && DATE_RE.test(event.date.slice(0, 10))
+      ? event.date.slice(0, 10)
+      : Array.isArray(event.recurringDates)
+      ? event.recurringDates
+          .filter((d) => typeof d === 'string' && DATE_RE.test(d.slice(0, 10)))
+          .sort()[0]
+          ?.slice(0, 10)
+      : undefined;
+
+  if (!candidateDate) return NaN;
+
+  if (typeof event.startTime === 'string' && TIME_RE.test(event.startTime.trim())) {
+    const match = event.startTime.trim().match(TIME_RE)!;
+    const normalizedTime = `${match[1]}:${match[2]}:${match[3] || '00'}`;
+    return torontoWallClockToUtcMs(candidateDate, normalizedTime, 0);
+  }
+
+  return torontoWallClockToUtcMs(candidateDate, '00:00:00', 0);
+}
+
+/**
  * Computes the effective end instant (UTC epoch ms) of an event in America/Toronto.
  * Precedence:
  *  1. Latest date among `date`, `endDate`, and any `recurringDates`
  *  2. Explicit `endTime` if valid, otherwise end of day (`23:59:59.999` Toronto time)
  */
 export function getEventEndUtcMs(event: EventLifecycleShape): number {
-  if (!event) return NaN;
+  if (!event || typeof event !== 'object') return NaN;
 
   // If explicit full ISO end timestamp is provided without separate date override, check validity
   const candidateIso = event.endUtcIso || event.end_iso;
-  if (candidateIso && !event.date && !event.endDate && !event.recurringDates?.length) {
+  if (typeof candidateIso === 'string' && !event.date && !event.endDate && !event.recurringDates?.length) {
     const parsed = Date.parse(candidateIso);
     if (!Number.isNaN(parsed)) return parsed;
   }
 
   const candidateDates: string[] = [];
-  if (event.date && DATE_RE.test(event.date.slice(0, 10))) {
+  if (typeof event.date === 'string' && DATE_RE.test(event.date.slice(0, 10))) {
     candidateDates.push(event.date.slice(0, 10));
   }
-  if (event.endDate && DATE_RE.test(event.endDate.slice(0, 10))) {
+  if (typeof event.endDate === 'string' && DATE_RE.test(event.endDate.slice(0, 10))) {
     candidateDates.push(event.endDate.slice(0, 10));
   }
   if (Array.isArray(event.recurringDates)) {
@@ -153,7 +183,7 @@ export function getEventEndUtcMs(event: EventLifecycleShape): number {
   candidateDates.sort();
   const effectiveEndDate = candidateDates[candidateDates.length - 1];
 
-  if (event.endTime && TIME_RE.test(event.endTime.trim())) {
+  if (typeof event.endTime === 'string' && TIME_RE.test(event.endTime.trim())) {
     const trimmed = event.endTime.trim();
     const match = trimmed.match(TIME_RE)!;
     const normalizedTime = `${match[1]}:${match[2]}:${match[3] || '00'}`;

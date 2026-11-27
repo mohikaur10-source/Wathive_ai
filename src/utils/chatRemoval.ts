@@ -27,9 +27,11 @@ export function isChatRemovedForPair(
   removedChats: RemovedChatRecord[],
   blockedUserIds: string[]
 ): boolean {
-  if (blockedUserIds.includes(partnerId)) return true;
+  if (!partnerId) return false;
+  if (Array.isArray(blockedUserIds) && blockedUserIds.includes(partnerId)) return true;
+  if (!Array.isArray(removedChats)) return false;
   return removedChats.some((entry) => {
-    if (entry.partnerId !== partnerId) return false;
+    if (!entry || entry.partnerId !== partnerId) return false;
     if (entry.reason === 'blocked' || entry.reason === 'reported') return true;
     return entry.reason === 'left' && entry.eventId === eventId;
   });
@@ -40,9 +42,12 @@ export function isPartnerBlockedOrReported(
   removedChats: RemovedChatRecord[],
   blockedUserIds: string[]
 ): boolean {
-  if (blockedUserIds.includes(partnerId)) return true;
+  if (!partnerId) return false;
+  if (Array.isArray(blockedUserIds) && blockedUserIds.includes(partnerId)) return true;
+  if (!Array.isArray(removedChats)) return false;
   return removedChats.some(
     (entry) =>
+      Boolean(entry) &&
       entry.partnerId === partnerId &&
       (entry.reason === 'blocked' || entry.reason === 'reported')
   );
@@ -58,8 +63,10 @@ export function getRequestRejectionForRemovedChat(
     return { blocked: true, message: '' };
   }
   if (
+    Array.isArray(removedChats) &&
     removedChats.some(
       (entry) =>
+        Boolean(entry) &&
         entry.partnerId === partnerId &&
         entry.reason === 'left' &&
         entry.eventId === eventId
@@ -70,41 +77,131 @@ export function getRequestRejectionForRemovedChat(
   return { blocked: false, message: '' };
 }
 
+function normalizeMessageList(rawMsgs: unknown): ChatMessage[] {
+  if (!Array.isArray(rawMsgs)) return [];
+  const valid: ChatMessage[] = [];
+  for (const item of rawMsgs) {
+    if (!item || typeof item !== 'object') continue;
+    const msg = item as Partial<ChatMessage>;
+    if (typeof msg.id !== 'string' || !msg.id) continue;
+    valid.push({
+      id: msg.id,
+      conversationId: typeof msg.conversationId === 'string' ? msg.conversationId : '',
+      senderId: typeof msg.senderId === 'string' ? msg.senderId : 'system',
+      text: typeof msg.text === 'string' ? msg.text : '',
+      timestamp: typeof msg.timestamp === 'string' ? msg.timestamp : ''
+    });
+  }
+  return valid;
+}
+
 /**
  * Pure filter applied on load/seed/hydration so removed or blocked chats
- * and their messages can never resurrect from cached state or seed data.
+ * and their messages can never resurrect from cached state or seed data,
+ * and malformed/partial records cannot crash the chat UI.
  */
 export function sanitizeChatSnapshot(snapshot: ChatStateSnapshot): ChatStateSnapshot {
-  const { conversations, chatMessages, connectionRequests, removedChats, blockedUserIds } = snapshot;
+  const safeRemovedChats = Array.isArray(snapshot?.removedChats)
+    ? snapshot.removedChats.filter(
+        (r): r is RemovedChatRecord =>
+          Boolean(r && typeof r === 'object' && typeof r.partnerId === 'string' && r.partnerId)
+      )
+    : [];
 
-  const cleanConversations = conversations.filter(
-    (conv) => !isChatRemovedForPair(conv.partner.id, conv.eventId, removedChats, blockedUserIds)
-  );
+  const safeBlockedUserIds = Array.isArray(snapshot?.blockedUserIds)
+    ? snapshot.blockedUserIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : [];
+
+  const rawConversations = Array.isArray(snapshot?.conversations) ? snapshot.conversations : [];
+  const cleanConversations: Conversation[] = [];
+
+  for (const rawConv of rawConversations) {
+    if (!rawConv || typeof rawConv !== 'object') continue;
+    const conv = rawConv as Partial<Conversation>;
+    if (typeof conv.id !== 'string' || !conv.id) continue;
+    if (typeof conv.eventId !== 'string' || !conv.eventId) continue;
+    const rawPartner = conv.partner as Partial<Conversation['partner']> | null | undefined;
+    if (!rawPartner || typeof rawPartner !== 'object' || typeof rawPartner.id !== 'string' || !rawPartner.id) {
+      continue;
+    }
+    if (isChatRemovedForPair(rawPartner.id, conv.eventId, safeRemovedChats, safeBlockedUserIds)) {
+      continue;
+    }
+
+    cleanConversations.push({
+      ...conv,
+      id: conv.id,
+      eventId: conv.eventId,
+      eventTitle: typeof conv.eventTitle === 'string' && conv.eventTitle ? conv.eventTitle : 'Campus Event',
+      eventDate: typeof conv.eventDate === 'string' ? conv.eventDate : '',
+      eventLocation:
+        typeof conv.eventLocation === 'string' && conv.eventLocation
+          ? conv.eventLocation
+          : 'Campus Venue',
+      partner: {
+        ...rawPartner,
+        id: rawPartner.id,
+        name:
+          typeof rawPartner.name === 'string' && rawPartner.name.trim()
+            ? rawPartner.name
+            : 'Waterloo Student',
+        avatar: typeof rawPartner.avatar === 'string' ? rawPartner.avatar : '',
+        isVerifiedUWStudent: rawPartner.isVerifiedUWStudent ?? true
+      },
+      lastMessage: typeof conv.lastMessage === 'string' ? conv.lastMessage : '',
+      lastMessageTime: typeof conv.lastMessageTime === 'string' ? conv.lastMessageTime : '',
+      unreadCount:
+        typeof conv.unreadCount === 'number' && Number.isFinite(conv.unreadCount) && conv.unreadCount > 0
+          ? conv.unreadCount
+          : 0,
+      isReported: Boolean(conv.isReported)
+    });
+  }
 
   const activeConversationIds = new Set(cleanConversations.map((c) => c.id));
+  const rawChatMessages =
+    snapshot?.chatMessages && typeof snapshot.chatMessages === 'object' && !Array.isArray(snapshot.chatMessages)
+      ? snapshot.chatMessages
+      : {};
   const cleanMessages: Record<string, ChatMessage[]> = {};
-  for (const [convId, msgs] of Object.entries(chatMessages)) {
+  for (const [convId, msgs] of Object.entries(rawChatMessages)) {
     if (activeConversationIds.has(convId)) {
-      cleanMessages[convId] = msgs;
+      cleanMessages[convId] = normalizeMessageList(msgs);
     }
   }
 
-  const cleanRequests = connectionRequests.reduce<ConnectionRequest[]>((acc, req) => {
-    const senderBlocked = isPartnerBlockedOrReported(req.senderId, removedChats, blockedUserIds);
-    const recipientBlocked = isPartnerBlockedOrReported(req.recipientId, removedChats, blockedUserIds);
+  const rawRequests = Array.isArray(snapshot?.connectionRequests) ? snapshot.connectionRequests : [];
+  const cleanRequests = rawRequests.reduce<ConnectionRequest[]>((acc, req) => {
+    if (!req || typeof req !== 'object') return acc;
+    if (
+      typeof req.id !== 'string' ||
+      typeof req.senderId !== 'string' ||
+      typeof req.recipientId !== 'string'
+    ) {
+      return acc;
+    }
+    const senderBlocked = isPartnerBlockedOrReported(
+      req.senderId,
+      safeRemovedChats,
+      safeBlockedUserIds
+    );
+    const recipientBlocked = isPartnerBlockedOrReported(
+      req.recipientId,
+      safeRemovedChats,
+      safeBlockedUserIds
+    );
 
     // Sent or incoming requests involving a blocked/reported person disappear
     if (senderBlocked || recipientBlocked) {
       return acc;
     }
 
-    const leftForPair =
-      removedChats.some(
-        (r) =>
-          r.reason === 'left' &&
-          r.eventId === req.eventId &&
-          (r.partnerId === req.senderId || r.partnerId === req.recipientId)
-      );
+    const leftForPair = safeRemovedChats.some(
+      (r) =>
+        r.reason === 'left' &&
+        r.eventId === req.eventId &&
+        (r.partnerId === req.senderId || r.partnerId === req.recipientId)
+    );
 
     if (leftForPair && req.status === 'pending') {
       acc.push({ ...req, status: 'withdrawn' });
@@ -119,8 +216,8 @@ export function sanitizeChatSnapshot(snapshot: ChatStateSnapshot): ChatStateSnap
     conversations: cleanConversations,
     chatMessages: cleanMessages,
     connectionRequests: cleanRequests,
-    removedChats,
-    blockedUserIds
+    removedChats: safeRemovedChats,
+    blockedUserIds: safeBlockedUserIds
   };
 }
 

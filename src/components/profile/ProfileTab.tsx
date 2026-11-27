@@ -13,7 +13,8 @@ import {
   CheckCircle2,
   ChevronDown,
   Pin,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Bell
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { EventFilterTag, EventItem } from '../../types';
@@ -51,7 +52,12 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onNavigateToMessages }) 
     blockedUserIds,
     unblockUser,
     allAttendees,
-    resetDemoData
+    resetDemoData,
+    notificationSettings,
+    updateNotificationSettings,
+    browserAlertsEnabled,
+    browserAlertPermission,
+    toggleBrowserAlerts
   } = useApp();
 
   const [editProfileOpen, setEditProfileOpen] = useState(false);
@@ -621,6 +627,92 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onNavigateToMessages }) 
         </button>
       </section>
 
+      {/* Buddy updates & Browser alerts */}
+      <section className="bg-surface rounded-3xl border border-line shadow-soft p-6 space-y-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <Bell className="w-4 h-4 text-accent-text mt-0.5 shrink-0" />
+            <div>
+              <h2 className="font-display text-base font-bold text-ink">
+                Buddy updates
+              </h2>
+              <p className="text-xs text-muted mt-0.5">
+                Get notified about matches, confirmations, and pairing changes.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            role="switch"
+            aria-label="Buddy updates"
+            aria-checked={notificationSettings.types.buddyMatches}
+            onClick={() =>
+              updateNotificationSettings({
+                ...notificationSettings,
+                types: {
+                  ...notificationSettings.types,
+                  buddyMatches: !notificationSettings.types.buddyMatches
+                }
+              })
+            }
+            className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 cursor-pointer ${
+              notificationSettings.types.buddyMatches
+                ? 'bg-accent'
+                : 'bg-surface-soft border border-line'
+            }`}
+          >
+            <span
+              className={`block w-5 h-5 rounded-full bg-surface shadow-soft transition-transform ${
+                notificationSettings.types.buddyMatches ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+
+        {notificationSettings.types.buddyMatches && (
+          <div className="pt-3 border-t border-line flex items-center justify-between gap-4">
+            <div className="pl-7">
+              <p className="text-xs font-semibold text-ink">Browser alerts</p>
+              {browserAlertPermission === 'denied' ? (
+                <p className="text-xs text-muted mt-0.5">
+                  Blocked in your browser settings.
+                </p>
+              ) : browserAlertPermission === 'unsupported' ? (
+                <p className="text-xs text-muted mt-0.5">
+                  Not supported in this browser.
+                </p>
+              ) : null}
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              aria-label="Browser alerts"
+              aria-checked={browserAlertsEnabled && browserAlertPermission === 'granted'}
+              disabled={browserAlertPermission === 'unsupported'}
+              onClick={async () => {
+                const next = !(browserAlertsEnabled && browserAlertPermission === 'granted');
+                await toggleBrowserAlerts(next);
+              }}
+              className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 cursor-pointer disabled:opacity-40 ${
+                browserAlertsEnabled && browserAlertPermission === 'granted'
+                  ? 'bg-accent'
+                  : 'bg-surface-soft border border-line'
+              }`}
+            >
+              <span
+                className={`block w-5 h-5 rounded-full bg-surface shadow-soft transition-transform ${
+                  browserAlertsEnabled && browserAlertPermission === 'granted'
+                    ? 'translate-x-5'
+                    : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+        )}
+      </section>
+
       {/* Blocked users */}
       <section className="bg-surface rounded-3xl border border-line shadow-soft overflow-hidden">
         <button
@@ -808,7 +900,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({ onNavigateToMessages }) 
         isOpen={quizModalOpen}
         onClose={() => setQuizModalOpen(false)}
         onSuccess={() => showNotice('Buddy vibe updated!')}
-        onNavigateToBuddyHub={() => onNavigateToMessages?.('requests')}
+        onNavigateToBuddyHub={() => onNavigateToMessages?.('conversations')}
       />
 
       {selectedEventForDetail && (

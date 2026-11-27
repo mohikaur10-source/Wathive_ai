@@ -8,11 +8,14 @@ import {
   LogOut,
   Sun,
   Moon,
-  ChevronDown
+  ChevronDown,
+  Bell
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { ThemeMode } from '../hooks/useTheme';
 import { BeeLogo } from './common/BeeLogo';
+import { formatNotificationRelativeTime } from '../utils/buddyNotifications';
+import { InAppNotification } from '../types';
 
 export type NavTab = 'feed' | 'calendar' | 'messages' | 'profile';
 
@@ -21,6 +24,8 @@ interface NavigationProps {
   onSelectTab: (tab: NavTab) => void;
   onOpenAuth: () => void;
   onOpenLanding: () => void;
+  onOpenNotificationChat: (conversationId?: string) => void;
+  onOpenNotificationEvent: (eventId: string) => void;
   theme: ThemeMode;
   onToggleTheme: () => void;
 }
@@ -30,23 +35,40 @@ export const Navigation: React.FC<NavigationProps> = ({
   onSelectTab,
   onOpenAuth,
   onOpenLanding,
+  onOpenNotificationChat,
+  onOpenNotificationEvent,
   theme,
   onToggleTheme
 }) => {
-  const { user, logout, connectionRequests, conversations } = useApp();
+  const {
+    user,
+    logout,
+    conversations,
+    visibleNotifications,
+    unreadNotificationsCount,
+    markNotificationAsRead,
+    markAllNotificationsAsRead,
+    effectiveNowMs
+  } = useApp();
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const notifRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
       }
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
+        setNotifOpen(false);
+      }
     };
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setMenuOpen(false);
+        setNotifOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -57,16 +79,27 @@ export const Navigation: React.FC<NavigationProps> = ({
     };
   }, []);
 
-  const pendingRequestsCount = connectionRequests.filter(
-    (r) => r.status === 'pending' && r.recipientId === user?.id
-  ).length;
+  const handleNotificationAction = (notif: InAppNotification) => {
+    markNotificationAsRead(notif.id);
+    setNotifOpen(false);
+    const hasOpenConversation = Boolean(
+      notif.conversationId && conversations.some((c) => c.id === notif.conversationId)
+    );
+    if ((notif.actionKind === 'open_chat' || notif.conversationId) && hasOpenConversation) {
+      onOpenNotificationChat(notif.conversationId);
+      return;
+    }
+    if (notif.eventId) {
+      onOpenNotificationEvent(notif.eventId);
+    }
+  };
 
   const unreadMessagesCount = conversations.reduce(
     (sum, c) => sum + (c.unreadCount || 0),
     0
   );
 
-  const totalMessageBadge = pendingRequestsCount + unreadMessagesCount;
+  const totalMessageBadge = unreadMessagesCount;
 
   return (
     <>
@@ -147,19 +180,140 @@ export const Navigation: React.FC<NavigationProps> = ({
             </button>
           </nav>
 
-          {/* Right: Theme Toggle + Avatar Dropdown (Profile, Sign In / Sign Out only) */}
+          {/* Right: Notification Bell + Theme Toggle + Avatar Dropdown */}
           <div className="flex items-center gap-2.5 shrink-0">
+            <div className="relative" ref={notifRef}>
+              <button
+                type="button"
+                onClick={() => {
+                  setNotifOpen((prev) => !prev);
+                  setMenuOpen(false);
+                }}
+                aria-expanded={notifOpen}
+                aria-haspopup="menu"
+                aria-label="Notifications"
+                title="Notifications"
+                className={`relative w-10 h-10 rounded-2xl flex items-center justify-center transition-colors cursor-pointer ${
+                  notifOpen
+                    ? 'bg-[#FFD54F] text-[#1C1917]'
+                    : 'bg-surface-soft/70 text-ink hover:bg-[#FFD54F] hover:text-[#1C1917] active:bg-[#FFC933] active:text-[#1C1917]'
+                }`}
+              >
+                <Bell className="w-4 h-4" />
+                {unreadNotificationsCount > 0 && (
+                  <span
+                    aria-label={`${unreadNotificationsCount} unread notifications`}
+                    className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-[#FFD54F] text-[#1C1917] border border-surface text-[10px] font-bold flex items-center justify-center tabular-nums leading-none"
+                  >
+                    {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
+                  </span>
+                )}
+              </button>
+
+              {notifOpen && (
+                <div
+                  role="dialog"
+                  aria-label="Notifications"
+                  className="absolute right-0 mt-2.5 w-80 sm:w-96 bg-surface rounded-3xl shadow-lift border border-line overflow-hidden z-50"
+                >
+                  <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-2">
+                    <span className="font-display text-sm font-bold text-ink">
+                      Notifications
+                    </span>
+                    {unreadNotificationsCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={markAllNotificationsAsRead}
+                        className="text-xs font-semibold text-accent-text hover:underline cursor-pointer"
+                      >
+                        Mark all read
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="max-h-96 overflow-y-auto divide-y divide-line filters-scroll">
+                    {visibleNotifications.length === 0 ? (
+                      <div className="px-4 py-8 text-center">
+                        <p className="text-xs text-muted">You&apos;re all caught up.</p>
+                      </div>
+                    ) : (
+                      visibleNotifications.map((notif) => {
+                        const relTime = formatNotificationRelativeTime(
+                          notif.createdAtMs,
+                          effectiveNowMs,
+                          notif.timestamp
+                        );
+                        const hasOpenConversation = Boolean(
+                          notif.conversationId &&
+                            conversations.some((c) => c.id === notif.conversationId)
+                        );
+                        const effectiveActionLabel =
+                          notif.actionKind === 'open_chat' && !hasOpenConversation
+                            ? notif.eventId
+                              ? 'View status'
+                              : undefined
+                            : notif.actionLabel;
+                        const hasActionTarget = hasOpenConversation || Boolean(notif.eventId);
+
+                        return (
+                          <div
+                            key={notif.id}
+                            className={`px-4 py-3 space-y-1.5 transition-colors ${
+                              notif.read ? 'bg-surface' : 'bg-accent-soft/35'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                {!notif.read && (
+                                  <span
+                                    className="w-2 h-2 rounded-full bg-accent shrink-0"
+                                    aria-label="Unread"
+                                  />
+                                )}
+                                <p className="text-xs font-bold text-ink truncate">
+                                  {notif.title}
+                                </p>
+                              </div>
+                              <span className="text-[11px] text-muted shrink-0">
+                                {relTime}
+                              </span>
+                            </div>
+
+                            <p className="text-xs text-muted leading-relaxed">
+                              {notif.message}
+                            </p>
+
+                            {effectiveActionLabel && hasActionTarget && (
+                              <div className="pt-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleNotificationAction(notif)}
+                                  className="text-xs font-semibold text-accent-text hover:underline cursor-pointer"
+                                >
+                                  {effectiveActionLabel}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <button
               type="button"
               onClick={onToggleTheme}
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
               title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="w-10 h-10 rounded-2xl bg-surface-soft/70 hover:bg-surface-soft text-ink flex items-center justify-center transition-colors cursor-pointer"
+              className="w-10 h-10 rounded-2xl bg-surface-soft/70 hover:bg-[#FFD54F] hover:text-[#1C1917] active:bg-[#FFC933] active:text-[#1C1917] text-ink flex items-center justify-center transition-colors cursor-pointer"
             >
               {theme === 'dark' ? (
                 <Sun className="w-4 h-4 text-accent" />
               ) : (
-                <Moon className="w-4 h-4 text-ink" />
+                <Moon className="w-4 h-4" />
               )}
             </button>
 

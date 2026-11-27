@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { motion, useReducedMotion, AnimatePresence } from 'motion/react';
 import { Bookmark, MapPin, Video, Check } from 'lucide-react';
-import { EventItem, AttendeeProfile } from '../../types';
+import { EventItem } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { safeMediaUrl } from '../../utils/urlSafety';
+import { formatSeekerCountText } from '../../utils/buddySeeding';
 import { Bee } from '../common/Bee';
 
 interface EventCardProps {
@@ -11,40 +12,14 @@ interface EventCardProps {
   onSelect: (event: EventItem) => void;
 }
 
-const HexAvatar: React.FC<{ attendee: AttendeeProfile; index: number }> = ({ attendee, index }) => {
-  const [imgFailed, setImgFailed] = useState(false);
-  const initials = attendee.name
-    .split(' ')
-    .map((p) => p[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase();
-
-  return (
-    <div
-      className="w-7 h-7 hex-mask bg-surface p-[2px] shrink-0"
-      style={{ zIndex: 10 - index }}
-      title={attendee.name}
-    >
-      {!imgFailed && attendee.avatar ? (
-        <img
-          src={attendee.avatar}
-          alt={attendee.name}
-          referrerPolicy="no-referrer"
-          onError={() => setImgFailed(true)}
-          className="w-full h-full object-cover hex-mask"
-        />
-      ) : (
-        <div className="w-full h-full hex-mask bg-accent-soft text-accent-text text-[10px] font-bold flex items-center justify-center">
-          {initials || 'UW'}
-        </div>
-      )}
-    </div>
-  );
-};
-
 export const EventCard: React.FC<EventCardProps> = ({ event, onSelect }) => {
-  const { savedEventIds, toggleSaveEvent, attendingEventIds, getEventAttendees } = useApp();
+  const {
+    savedEventIds,
+    toggleSaveEvent,
+    attendingEventIds,
+    conversations,
+    getEventAttendees
+  } = useApp();
   const [imgError, setImgError] = useState(false);
   const [buzzTrigger, setBuzzTrigger] = useState(0);
   const prefersReduced = useReducedMotion();
@@ -55,6 +30,7 @@ export const EventCard: React.FC<EventCardProps> = ({ event, onSelect }) => {
 
   const attendees = getEventAttendees(event.id);
   const buddyCount = attendees.length;
+  const isMatchedForEvent = conversations.some((c) => c.eventId === event.id);
 
   // Parse month and day for the overlaid calendar tile
   const parseCalendarTile = (dateStr: string) => {
@@ -126,12 +102,12 @@ export const EventCard: React.FC<EventCardProps> = ({ event, onSelect }) => {
           </div>
 
           {isCancelled && (
-            <span className="mt-0.5 bg-danger text-white text-[11px] font-semibold px-2.5 py-1 rounded-2xl shadow-soft">
+            <span className="mt-0.5 bg-danger text-white text-[11px] font-semibold px-2.5 py-1 rounded-full shadow-soft">
               Cancelled
             </span>
           )}
           {!isCancelled && isGoing && (
-            <span className="mt-0.5 inline-flex items-center gap-1 bg-surface/95 text-ink text-[11px] font-semibold px-2.5 py-1 rounded-2xl shadow-soft">
+            <span className="mt-0.5 inline-flex items-center gap-1 bg-surface/95 text-ink text-[11px] font-semibold px-2.5 py-1 rounded-full shadow-soft">
               <Check className="w-3 h-3 text-accent-text stroke-[2.8]" />
               <span>Going</span>
             </span>
@@ -171,7 +147,7 @@ export const EventCard: React.FC<EventCardProps> = ({ event, onSelect }) => {
         </div>
       </div>
 
-      {/* Quiet Card Body: Title, One Location Line, and Buddy Highlight */}
+      {/* Quiet Card Body: Title, One Location Line, and Calm Buddy Count */}
       <div className="p-5 flex-1 flex flex-col justify-between gap-4">
         <div className="space-y-2">
           <h3 className="font-display font-semibold text-[17px] text-ink leading-snug group-hover:text-accent-text transition-colors line-clamp-2">
@@ -188,34 +164,24 @@ export const EventCard: React.FC<EventCardProps> = ({ event, onSelect }) => {
           </div>
         </div>
 
-        {/* Buddy Highlight */}
-        <div className="flex items-center gap-2.5 pt-1">
+        {/* Calm Buddy Count Line (no photos grid, no names) */}
+        <div className="pt-1">
           {event.isResearchStudy ? (
             <span className="text-xs text-muted">
               Research study · Individual participation
             </span>
+          ) : isMatchedForEvent ? (
+            <span className="text-xs font-semibold text-accent-text">
+              You&apos;re matched
+            </span>
           ) : buddyCount > 0 ? (
-            <>
-              <div className="flex items-center -space-x-2 shrink-0">
-                {attendees.slice(0, 3).map((att, idx) => (
-                  <HexAvatar key={att.id} attendee={att} index={idx} />
-                ))}
-              </div>
-              <span className="text-xs font-medium text-ink truncate">
-                <strong className="font-semibold tabular-nums">{buddyCount}</strong>{' '}
-                looking for a buddy
-              </span>
-            </>
+            <span className="text-xs font-medium text-muted tabular-nums">
+              {formatSeekerCountText(buddyCount)}
+            </span>
           ) : (
-            <>
-              <div
-                aria-hidden="true"
-                className="w-6 h-6 hex-mask bg-surface-soft shrink-0"
-              />
-              <span className="text-xs text-muted truncate">
-                Be the first to find a buddy
-              </span>
-            </>
+            <span className="text-xs text-muted">
+              Looking for a buddy?
+            </span>
           )}
         </div>
       </div>

@@ -151,7 +151,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                 <span>Interactive Prototype Mode</span>
               </div>
               <p className="text-muted leading-normal">
-                No real passwords required. You can test immediately using the pre-loaded Alex Chen profile (with active chats and incoming buddy requests), or create a custom demo student.
+                No real passwords required. You can test immediately using the pre-loaded Alex Chen profile (verified UW student with campus events and buddy matching), or create a custom demo student.
               </p>
             </div>
 

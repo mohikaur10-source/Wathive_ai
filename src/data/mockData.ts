@@ -15,9 +15,11 @@ import { DEFAULT_ALEX_QUIZ, computeBuddyArchetype } from '../utils/compatibility
 import { toWaterlooUtcIso } from '../utils/timeZone';
 import waterlooGooseAvatar from '../assets/images/waterloo_goose_avatar_1794962499830.jpg';
 
-export const formatPublicName = (fullName: string): string => {
-  if (!fullName) return '';
-  const parts = fullName.trim().split(/\s+/);
+export const formatPublicName = (fullName: string | null | undefined): string => {
+  if (!fullName || typeof fullName !== 'string') return '';
+  const clean = fullName.trim();
+  if (!clean) return '';
+  const parts = clean.split(/\s+/);
   if (parts.length === 1) return parts[0];
   const firstName = parts[0];
   const lastInitial = parts[parts.length - 1].charAt(0).toUpperCase();
@@ -188,7 +190,7 @@ export const SAMPLE_ATTENDEES: Record<string, AttendeeProfile> = {
       prefersGroup: true
     },
     showFaculty: true,
-    showYear: true,
+    showYear: false,
     isVerifiedUWStudent: true,
     personalityQuiz: {
       completed: true,
@@ -285,6 +287,166 @@ export const SAMPLE_ATTENDEES: Record<string, AttendeeProfile> = {
       preferenceBubbles: ['Same faculty', 'Alcohol-free hangouts', 'Strictly platonic'],
       archetype: computeBuddyArchetype({
         q1: 'B', q2: 'B', q3: 'C', q4: 'A', q5: 'A', q6: 'A', q7: 'B', q8: 'B'
+      })
+    }
+  },
+  ethan_bhatia: {
+    id: 'ethan_bhatia',
+    name: 'Ethan B.',
+    avatar: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=256&q=80',
+    faculty: 'Health',
+    program: 'Kinesiology',
+    year: '3rd Year',
+    bio: 'Intramural badminton player and SLC study-session regular.',
+    gender: 'man',
+    defaultSocialBattery: 'Hyped & Chatty',
+    traits: {
+      alcoholFree: false,
+      strictlyPlatonic: true,
+      studyFocused: false,
+      punctual: true,
+      livesOnCampus: false,
+      commuterFriendly: true,
+      prefersGroup: true
+    },
+    showFaculty: true,
+    showYear: true,
+    isVerifiedUWStudent: true,
+    personalityQuiz: {
+      completed: true,
+      answers: {
+        q1: 'A',
+        q2: 'A',
+        q3: 'B',
+        q4: 'C',
+        q5: 'A',
+        q6: 'A',
+        q7: 'A',
+        q8: 'B'
+      },
+      preferenceBubbles: ['Group match (3–4 people)', 'Strictly platonic', 'Commuter-friendly'],
+      archetype: computeBuddyArchetype({
+        q1: 'A', q2: 'A', q3: 'B', q4: 'C', q5: 'A', q6: 'A', q7: 'A', q8: 'B'
+      })
+    }
+  },
+  nadia_hassan: {
+    id: 'nadia_hassan',
+    name: 'Nadia H.',
+    avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=256&q=80',
+    faculty: 'Mathematics',
+    program: 'Combinatorics and Optimization',
+    year: '4th Year',
+    bio: 'Love campus board game nights, matcha lattes, and tech talks.',
+    gender: 'woman',
+    defaultSocialBattery: 'Chill & Observing',
+    traits: {
+      alcoholFree: true,
+      strictlyPlatonic: true,
+      studyFocused: true,
+      punctual: true,
+      livesOnCampus: true,
+      commuterFriendly: true,
+      prefersGroup: false
+    },
+    showFaculty: true,
+    showYear: true,
+    isVerifiedUWStudent: true,
+    personalityQuiz: {
+      completed: true,
+      answers: {
+        q1: 'B',
+        q2: 'B',
+        q3: 'A',
+        q4: 'B',
+        q5: 'B',
+        q6: 'B',
+        q7: 'B',
+        q8: 'A'
+      },
+      preferenceBubbles: ['Same faculty', 'Alcohol-free hangouts', 'Punctual / No flakes'],
+      archetype: computeBuddyArchetype({
+        q1: 'B', q2: 'B', q3: 'A', q4: 'B', q5: 'B', q6: 'B', q7: 'B', q8: 'A'
+      })
+    }
+  },
+  owen_reid: {
+    id: 'owen_reid',
+    name: 'Owen R.',
+    avatar: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?auto=format&fit=crop&w=256&q=80',
+    faculty: 'Arts',
+    program: 'Economics',
+    year: '2nd Year',
+    bio: 'Up for coffee chats, club fairs, and weekend campus concerts.',
+    gender: 'man',
+    defaultSocialBattery: 'Chill & Observing',
+    traits: {
+      alcoholFree: true,
+      strictlyPlatonic: true,
+      studyFocused: false,
+      punctual: true,
+      livesOnCampus: true,
+      commuterFriendly: false,
+      prefersGroup: false
+    },
+    showFaculty: true,
+    showYear: true,
+    isVerifiedUWStudent: true,
+    personalityQuiz: {
+      completed: true,
+      answers: {
+        q1: 'B',
+        q2: 'A',
+        q3: 'C',
+        q4: 'A',
+        q5: 'A',
+        q6: 'B',
+        q7: 'A',
+        q8: 'A'
+      },
+      preferenceBubbles: ['Alcohol-free hangouts', 'Strictly platonic', 'Lives on campus'],
+      archetype: computeBuddyArchetype({
+        q1: 'B', q2: 'A', q3: 'C', q4: 'A', q5: 'A', q6: 'B', q7: 'A', q8: 'A'
+      })
+    }
+  },
+  tessa_morales: {
+    id: 'tessa_morales',
+    name: 'Tessa M.',
+    avatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=256&q=80',
+    faculty: 'Science',
+    program: 'Physics & Astronomy',
+    year: '1st Year',
+    bio: 'Stargazing club member looking to meet friendly faces at campus events.',
+    gender: 'woman',
+    defaultSocialBattery: "Just don't want to walk alone",
+    traits: {
+      alcoholFree: true,
+      strictlyPlatonic: true,
+      studyFocused: true,
+      punctual: true,
+      livesOnCampus: true,
+      commuterFriendly: true,
+      prefersGroup: true
+    },
+    showFaculty: true,
+    showYear: true,
+    isVerifiedUWStudent: true,
+    personalityQuiz: {
+      completed: true,
+      answers: {
+        q1: 'B',
+        q2: 'B',
+        q3: 'C',
+        q4: 'A',
+        q5: 'B',
+        q6: 'B',
+        q7: 'B',
+        q8: 'B'
+      },
+      preferenceBubbles: ['Alcohol-free hangouts', 'Strictly platonic', 'Lives on campus'],
+      archetype: computeBuddyArchetype({
+        q1: 'B', q2: 'B', q3: 'C', q4: 'A', q5: 'B', q6: 'B', q7: 'B', q8: 'B'
       })
     }
   }
@@ -397,113 +559,19 @@ export const CATEGORY_COLORS: Record<string, { bg: string; text: string; hex: st
 // WatHive event catalogue is dynamically populated from live backend (/api/collector/preview)
 export const INITIAL_EVENTS: EventItem[] = [];
 
-// Mapping of which sample attendees are going to which events (with openToMeeting: true)
-export const INITIAL_EVENT_ATTENDEES: Record<string, string[]> = {
-  'wusa_247403': ['maya_patel', 'sarah_kim', 'marcus_zhao'], // Know Your Rights Before You Sign the Lease
-  'wusa_249666': ['chloe_tremblay', 'priya_sharma', 'sarah_kim'], // Mates X Counselling Services Stress Workshop
-  'wusa_250173': ['maya_patel', 'chloe_tremblay', 'liam_campbell', 'sarah_kim'], // Roshni Diwali Musical Celebration
-  'wusa_244843': ['liam_campbell', 'marcus_zhao', 'sarah_kim'], // Fruit & Veggie Market (Nov 25)
-  'wusa_250216': ['chloe_tremblay', 'priya_sharma'], // Makeup Night at Glow Centre
-  'wusa_246689': ['priya_sharma', 'chloe_tremblay', 'sarah_kim'], // Accounting Conference
-  'wusa_249683': ['liam_campbell', 'marcus_zhao', 'maya_patel'], // Trivia Night @ The Bomber
-  'wusa_247753': ['maya_patel', 'chloe_tremblay', 'sarah_kim'], // Winter Warm-Up Event (Dec 5)
-  'wusa_244717': ['marcus_zhao', 'liam_campbell'], // Lady Rev Classic Invitational
-  'wusa_245612': ['maya_patel', 'priya_sharma'],
-  'wusa_246355': ['marcus_zhao', 'liam_campbell', 'maya_patel'],
-  'wusa_244841': ['liam_campbell', 'marcus_zhao', 'sarah_kim']
-};
+// Buddy seekers per event are deterministically generated via getSeedBuddySeekers(eventId)
+export const INITIAL_EVENT_ATTENDEES: Record<string, string[]> = {};
 
-export const INITIAL_USER_ATTENDING = ['wusa_247403', 'wusa_244843'];
-export const INITIAL_USER_SAVED = ['wusa_250173', 'wusa_246689', 'wusa_249683'];
-// Buddy matching is strictly OFF by default per event. Users must explicitly preview and opt in.
+export const INITIAL_USER_ATTENDING = ['wusa_253953'];
+export const INITIAL_USER_SAVED = ['wusa_246689', 'wusa_255978'];
+// Buddy matching is strictly OFF by default per event. Users must explicitly opt in.
 export const INITIAL_USER_VISIBILITY: Record<string, boolean> = {};
 
-// Initial incoming requests for Alex with Icebreaker Hooks
-export const INITIAL_REQUESTS: ConnectionRequest[] = [
-  {
-    id: 'req_maya_screampark',
-    eventId: 'wusa_246355',
-    eventTitle: "Bingeman's Screampark Trip with ICSN",
-    eventDate: '2026-10-24',
-    senderId: 'maya_patel',
-    senderName: 'Maya P.',
-    senderAvatar: SAMPLE_ATTENDEES.maya_patel.avatar,
-    senderFaculty: SAMPLE_ATTENDEES.maya_patel.faculty,
-    senderProgram: SAMPLE_ATTENDEES.maya_patel.program,
-    senderYear: SAMPLE_ATTENDEES.maya_patel.year,
-    recipientId: 'user_alex_chen',
-    recipientName: 'Alex C.',
-    introMessage: "Hey Alex! None of my roommates are free this evening—would you want to head over together?",
-    compatibilityScore: 95,
-    compatibilityReasons: [
-      'You both picked Midnight Shawarma & Chill Cafe',
-      'Matched energy: Chill & Observing',
-      'Matches preferences: Strictly platonic, Punctual / No flakes'
-    ],
-    icebreakerPill: 'You both picked Midnight Shawarma & Chill Cafe',
-    icebreakerBanner: "Icebreaker: You both prefer midnight shawarma & late-night hangs and chill cafe hangouts. Ask them what they're most excited for!",
-    icebreakerQuestion: "Important Waterloo question: Lazeez, Osmow’s, or Shawerma Plus?",
-    socialBattery: 'Chill & Observing',
-    status: 'pending',
-    createdAt: '2026-10-21T10:15:00Z'
-  }
-];
+export const INITIAL_REQUESTS: ConnectionRequest[] = [];
 
-// Initial accepted conversation with Marcus for Fruit & Veggie Market
-export const INITIAL_CONVERSATIONS: Conversation[] = [
-  {
-    id: 'conv_marcus_market',
-    eventId: 'wusa_244841',
-    eventTitle: 'Fruit & Veggie Market',
-    eventDate: '2026-10-28',
-    eventLocation: 'Student Life Centre (SLC) Lower Atrium',
-    partner: SAMPLE_ATTENDEES.marcus_zhao,
-    lastMessage: 'Awesome! Let us meet by the SLC Tim Hortons around 11:15am so we can grab fresh produce before the line gets long.',
-    lastMessageTime: '11:42 AM',
-    unreadCount: 0,
-    isReported: false,
-    stayConnectedUser: false,
-    stayConnectedPartner: false,
-    isChatClosedPostEvent: false,
-    icebreakerPill: 'You both picked Midnight Shawarma & Trying New Things',
-    icebreakerBanner: "Icebreaker: You both prefer midnight shawarma & late-night hangs and trying new activities. Ask them what they're most excited for!",
-    icebreakerQuestion: "Important Waterloo question: Lazeez, Osmow’s, or Shawerma Plus?",
-    socialBattery: 'Hyped & Chatty'
-  }
-];
+export const INITIAL_CONVERSATIONS: Conversation[] = [];
 
-export const INITIAL_CHAT_MESSAGES: Record<string, ChatMessage[]> = {
-  conv_marcus_market: [
-    {
-      id: 'm1',
-      conversationId: 'conv_marcus_market',
-      senderId: 'user_alex_chen',
-      text: 'Hey Marcus! Are you heading to the WUSA Fruit & Veggie Market this Wednesday?',
-      timestamp: '11:30 AM'
-    },
-    {
-      id: 'm2',
-      conversationId: 'conv_marcus_market',
-      senderId: 'marcus_zhao',
-      text: 'Hey Alex, yes definitely! Need to stock up on fresh apples and veggies for the week. Usually the line gets long around noon!',
-      timestamp: '11:34 AM'
-    },
-    {
-      id: 'm3',
-      conversationId: 'conv_marcus_market',
-      senderId: 'user_alex_chen',
-      text: 'Would you like to meet by the SLC entrance before heading down?',
-      timestamp: '11:38 AM'
-    },
-    {
-      id: 'm4',
-      conversationId: 'conv_marcus_market',
-      senderId: 'marcus_zhao',
-      text: 'Awesome! Let us meet by the SLC Tim Hortons around 11:15am so we can grab fresh produce before the line gets long.',
-      timestamp: '11:42 AM'
-    }
-  ]
-};
+export const INITIAL_CHAT_MESSAGES: Record<string, ChatMessage[]> = {};
 
 export const UW_FACULTIES = [
   'Engineering',
@@ -564,85 +632,7 @@ export const DEFAULT_NOTIFICATION_SETTINGS: import('../types').NotificationSetti
   avoidOverwhelming: true
 };
 
-export const INITIAL_NOTIFICATIONS: import('../types').InAppNotification[] = [
-  {
-    id: 'notif_1',
-    type: 'buddy_match',
-    title: 'New Buddy-Match Request',
-    message: "Maya P. (94% Compatibility) invited you to take the shuttle together for Bingeman's Screampark Trip with ICSN.",
-    timestamp: '15m ago',
-    read: false,
-    eventId: 'wusa_246355',
-    eventTitle: "Bingeman's Screampark Trip with ICSN",
-    category: 'Nightlife and entertainment',
-    actionLabel: 'View Buddy Request',
-    urgent: true
-  },
-  {
-    id: 'notif_2',
-    type: 'upcoming_reminder',
-    title: 'Upcoming RSVP: Fruit & Veggie Market Tomorrow',
-    message: 'WUSA Fruit & Veggie Market is running tomorrow at 11:00 AM at the SLC Lower Atrium.',
-    timestamp: '2h ago',
-    read: false,
-    eventId: 'wusa_244841',
-    eventTitle: 'Fruit & Veggie Market',
-    category: 'Food and student deals',
-    actionLabel: 'View Event',
-    urgent: false
-  },
-  {
-    id: 'notif_3',
-    type: 'registration_deadline',
-    title: 'Registration Deadline Approaching',
-    message: 'Registration for the UW Accounting Conference closes in 48 hours.',
-    timestamp: '5h ago',
-    read: false,
-    eventId: 'wusa_246689',
-    eventTitle: 'Accounting Conference',
-    category: 'Networking and professional development',
-    actionUrl: 'https://wusa.ca/events/',
-    actionLabel: 'Complete Registration',
-    urgent: true
-  },
-  {
-    id: 'notif_4',
-    type: 'schedule_change',
-    title: 'Venue Details Updated',
-    message: 'The Winter Warm-Up Event venue confirmed at SLC Black and Gold Room.',
-    timestamp: '1d ago',
-    read: true,
-    eventId: 'wusa_247699',
-    eventTitle: 'The Winter Warm-Up Event: Free Essentials for Everyone',
-    category: 'Volunteering and community activities',
-    actionLabel: 'Check Location',
-    urgent: false
-  },
-  {
-    id: 'notif_5',
-    type: 'student_discount',
-    title: 'New Campus Student Deal',
-    message: 'WUSA Fall Perks: 20% off all hot drinks and bakery items at SLC Tim Hortons & Black Goose Cafe.',
-    timestamp: '1d ago',
-    read: true,
-    category: 'Food and student deals',
-    discountDeal: '20% Off Hot Drinks with WatCard',
-    urgent: false
-  },
-  {
-    id: 'notif_6',
-    type: 'new_event',
-    title: 'New Event in Your Interests',
-    message: 'WUSA Thrift Sidewalk Sale just scheduled in the Student Life Centre.',
-    timestamp: '2d ago',
-    read: true,
-    eventId: 'wusa_248560',
-    eventTitle: 'Thrift Sidewalk Sale: October',
-    category: 'University clubs',
-    actionLabel: 'Explore Event',
-    urgent: false
-  }
-];
+export const INITIAL_NOTIFICATIONS: import('../types').InAppNotification[] = [];
 
 // Technical & Operational Aggregation Feeds (Requirement 8)
 export const INITIAL_AGGREGATION_SOURCES: AggregationSource[] = [

@@ -373,8 +373,8 @@ export const DEFAULT_ALEX_QUIZ: PersonalityQuizProfile = {
  * Safely normalizes any stored/legacy quiz profile into the new 8-question format.
  */
 export function normalizeQuizProfile(quiz?: PersonalityQuizProfile): PersonalityQuizProfile | undefined {
-  if (!quiz) return undefined;
-  if (quiz.answers && quiz.answers.q1 && quiz.answers.q8) {
+  if (!quiz || typeof quiz !== 'object' || Array.isArray(quiz)) return undefined;
+  if (quiz.answers && typeof quiz.answers === 'object' && quiz.answers.q1 && quiz.answers.q8) {
     return {
       ...quiz,
       preferenceBubbles: Array.isArray(quiz.preferenceBubbles) ? quiz.preferenceBubbles : [],
@@ -598,7 +598,10 @@ export function getConversationStarters(
   }
 
   // Ensure at least 2 helpful, context-aware message starters
-  const firstName = partnerProfile?.name ? partnerProfile.name.trim().split(/\s+/)[0] : '';
+  const firstName =
+    typeof partnerProfile?.name === 'string' && partnerProfile.name.trim()
+      ? partnerProfile.name.trim().split(/\s+/)[0] || ''
+      : '';
   if (prompts.length < 2) {
     if (isEventEnded) {
       addPrompt(
@@ -632,12 +635,13 @@ export function evaluateDealbreakers(
   userProfile?: UserProfile | null,
   partnerProfile?: AttendeeProfile | null
 ): { passes: boolean; reason?: string; softMatched: string[]; softTotal: number } {
-  if (!partnerProfile || preferenceBubbles.length === 0) {
+  const safeBubbles = Array.isArray(preferenceBubbles) ? preferenceBubbles : [];
+  if (!partnerProfile || typeof partnerProfile !== 'object' || safeBubbles.length === 0) {
     return { passes: true, softMatched: [], softTotal: 0 };
   }
 
   // Hard filters
-  if (preferenceBubbles.includes('Women only') && partnerProfile.gender && partnerProfile.gender !== 'woman') {
+  if (safeBubbles.includes('Women only') && partnerProfile.gender && partnerProfile.gender !== 'woman') {
     return { passes: false, reason: 'Filtered out by Women only preference', softMatched: [], softTotal: 0 };
   }
   if (preferenceBubbles.includes('Men only') && partnerProfile.gender && partnerProfile.gender !== 'man') {
